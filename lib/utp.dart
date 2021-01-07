@@ -3,6 +3,4 @@
 /// More dartdocs go here.
 library utp;
 
-export 'src/utp_base.dart';
-
-// TODO: Export any libraries intended for clients of this package.
+export 'src/utp_protocol_implement.dart';

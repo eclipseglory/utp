@@ -76,6 +76,11 @@ class UTPData {
   /// Data Extension
   Extension dataExtension;
 
+  /// Payload start with
+  ///
+  /// Sometimes, the whole data bytes with `Header`(include `Extension`) and `Payload`,
+  /// so it need not to split `Payload` into a new buffer. This field record
+  /// the index `Payload` start with
   final int offset;
 
   UTPData(this.type, this.connectionId, this.timestamp,
@@ -194,6 +199,7 @@ Uint8List createData(int type, int connectionId, int timestamp,
   return bytes;
 }
 
+/// Parse bytes [data] to `UTPData` instance
 UTPData parseData(Uint8List data) {
   var view = ByteData.view(data.buffer);
   var first = data[0];

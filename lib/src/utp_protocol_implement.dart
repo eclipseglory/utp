@@ -5,10 +5,11 @@ import 'dart:math';
 import 'dart:typed_data';
 
 import 'utp_data.dart';
+import 'utp_socket_recorder.dart';
 
 ///
 ///
-class UTPSocketPool with _UTPSocketRecorder {
+class UTPSocketPool with UTPSocketRecorder {
   bool _disposed = false;
 
   /// 是否已被销毁
@@ -39,7 +40,7 @@ class UTPSocketPool with _UTPSocketRecorder {
       InternetAddress remoteAddress, int remotePort) async {
     assert(remotePort != null && remoteAddress != null,
         'Address and port can not be null');
-    var utp = _getUTPSocket(remoteAddress, remotePort);
+    var utp = findUTPSocket(remoteAddress, remotePort);
     if (utp != null) return utp;
     var stack = _avalidateStack;
     RawDatagramSocket socket;
@@ -54,12 +55,12 @@ class UTPSocketPool with _UTPSocketRecorder {
     utp = _UTPSocket(socket.address, socket.port, remoteAddress, remotePort);
     utp._socket = socket;
     stack.add(utp);
-    _recordUTPSocket(utp, remoteAddress, remotePort);
+    recordUTPSocket(utp, remoteAddress, remotePort);
     socket.listen((event) => _onData(socket, event),
         onDone: () => _onDone(socket), onError: (e) => _onError(socket, e));
     var completer = Completer<UTPSocket>();
-    _sendSYN(utp); // Start to connect
     _connectingSocketMap[utp] = completer;
+    _sendSYN(utp); // Start to connect
     return completer.future;
   }
 
@@ -102,54 +103,12 @@ class UTPSocketPool with _UTPSocketRecorder {
       var address = datagram.address;
       var port = datagram.port;
       var data = datagram.data;
-      var utp = _getUTPSocket(address, port);
-      if (utp == null || utp.isClosed) return;
-      UTPData packageData;
-      var completer = _connectingSocketMap.remove(utp);
-      try {
-        packageData = parseData(data);
-      } catch (e) {
-        completer?.completeError(e);
-        dev.log('Parse receive data error',
-            error: e, name: runtimeType.toString());
-        return;
-      }
-      if (packageData.type == ST_STATE) {
-        if (utp._connectState == _UTPSocketConnectState.SYN_SENT) {
-          var errMsg = _validatePackage(packageData, utp);
-          if (errMsg != null) {
-            completer?.completeError(errMsg);
-            dev.log('Connect remote error',
-                error: errMsg, name: runtimeType.toString());
-            return;
-          }
-          utp._lastRemoteTimestamp = packageData.timestamp;
-          utp._currentLocalAck = packageData.seq_nr;
-
-          utp._connectState = _UTPSocketConnectState.CONNECTED;
-
-          utp._sendRawData(ST_DATA);
-          completer?.complete(utp);
-          return;
-        }
-      }
-      if (packageData.type == ST_DATA) {
-        if (utp._connectState != _UTPSocketConnectState.CONNECTED) {
-          throw 'UTP socket is not connected, cant process ST_DATA';
-        }
-        var errMsg = _validatePackage(packageData, utp);
-        if (errMsg != null) {
-          dev.log('Remote data error',
-              error: errMsg, name: runtimeType.toString());
-          return;
-        }
-        utp._lastRemoteTimestamp = packageData.timestamp;
-        utp._currentLocalAck = packageData.seq_nr;
-        var payload = packageData.payload;
-        if (payload == null || payload.isEmpty) return;
-        var offset = packageData.offset;
-        utp._receive(payload.sublist(offset));
-      }
+      var utp = findUTPSocket(address, port);
+      Completer<UTPSocket> completer;
+      if (utp != null) completer = _connectingSocketMap.remove(utp);
+      _processReceiveData(utp._socket, address, port, data, utp,
+          onConnected: (socket) => completer?.complete(socket),
+          onError: (socket, error) => completer?.completeError(error));
     }
   }
 
@@ -228,7 +187,7 @@ abstract class ServerUTPSocket {
   }
 }
 
-class _ServerUTPSocket extends ServerUTPSocket with _UTPSocketRecorder {
+class _ServerUTPSocket extends ServerUTPSocket with UTPSocketRecorder {
   bool _closed = false;
 
   bool get isClosed => _closed;
@@ -247,7 +206,10 @@ class _ServerUTPSocket extends ServerUTPSocket with _UTPSocketRecorder {
         var data = datagram.data;
         var address = datagram.address;
         var port = datagram.port;
-        _processReceiveData(address, port, data);
+        _processReceiveData(
+            _socket, address, port, data, findUTPSocket(address, port),
+            newSocket: (socket) => recordUTPSocket(socket, address, port),
+            onConnected: (socket) => _sc?.add(socket));
       }
     }, onDone: () {
       close('Remote/Local socket closed');
@@ -256,66 +218,6 @@ class _ServerUTPSocket extends ServerUTPSocket with _UTPSocketRecorder {
         socket?._receiveError(e);
       });
     });
-  }
-
-  /// Server Socket监听外部连接时处理接收数据
-  void _processReceiveData(InternetAddress address, int port, Uint8List data) {
-    if (isClosed || _socket == null) return;
-    UTPData packageData;
-    try {
-      packageData = parseData(data);
-    } catch (e) {
-      dev.log('Parse receive data error :',
-          error: e, name: runtimeType.toString());
-      return;
-    }
-
-    var socket = _getUTPSocket(address, port);
-    if (socket != null) {
-      if (packageData.type == ST_DATA) {
-        var error = _validatePackage(packageData, socket);
-        if (error != null) {
-          dev.log('Remote connect error:',
-              error: error, name: runtimeType.toString());
-          socket.close();
-          return;
-        }
-        socket._lastRemoteTimestamp = packageData.timestamp;
-        socket._currentLocalAck = packageData.seq_nr;
-        // 远程第二次发送信息确认连接
-        if (socket._connectState == _UTPSocketConnectState.SYN_RECV) {
-          socket._connectState = _UTPSocketConnectState.CONNECTED;
-          _sc?.add(socket);
-          return;
-        }
-        // 已连接状态下收到数据后去掉header，把payload以事件发出
-        if (socket._connectState == _UTPSocketConnectState.CONNECTED) {
-          if (packageData.payload == null || packageData.payload.isEmpty) {
-            return;
-          }
-          var data = packageData.payload.sublist(packageData.offset);
-          socket._receive(data);
-          return;
-        }
-      }
-      return;
-    } else {
-      // 远程发起连接
-      if (packageData.type == ST_SYN) {
-        var utp = _UTPSocket(_socket.address, _socket.port, address, port);
-        utp._socket = _socket;
-        _recordUTPSocket(utp, address, port);
-        // init receive_id and sent_id
-        utp._receiveId = packageData.connectionId + 1;
-        utp._sendId = packageData.connectionId; // 保证发送的conn id一致
-        utp._currentLocalSeq = Random().nextInt(65535); // 随机一个发送序列
-        utp._currentLocalAck = packageData.seq_nr;
-        utp._connectState = _UTPSocketConnectState.SYN_RECV; // 更改连接状态
-        utp._lastRemoteTimestamp = packageData.timestamp;
-        utp._sendRawData(ST_STATE);
-        return;
-      }
-    }
   }
 
   @override
@@ -491,6 +393,7 @@ class _UTPSocket extends UTPSocket {
   bool get isClosed => _closed;
 
   StreamController<Uint8List> _streamController;
+  
   _UTPSocket(InternetAddress address, int port,
       [InternetAddress remoteAddress, int remotePort])
       : super(address, port, remoteAddress, remotePort) {
@@ -542,125 +445,96 @@ class _UTPSocket extends UTPSocket {
   }
 }
 
-mixin _UTPSocketRecorder {
-  final Map<InternetAddress, Map<int, UTPSocket>> _indexMap = {};
-
-  UTPSocket _getUTPSocket(InternetAddress remoteAddress, int remotePort) {
-    var m = _indexMap[remoteAddress];
-    if (m != null) {
-      return m[remotePort];
-    }
-    return null;
-  }
-
-  void _recordUTPSocket(UTPSocket s, InternetAddress address, int port) {
-    _indexMap[address] ??= <int, UTPSocket>{};
-    var m = _indexMap[address];
-    m[port] = s;
-  }
-
-  UTPSocket _removeUTPSocket(InternetAddress remoteAddress, int remotePort) {
-    var m = _indexMap[remoteAddress];
-    if (m != null) {
-      return m.remove(remotePort);
-    }
-    return null;
-  }
-
-  void forEach(void Function(UTPSocket socket) processer) {
-    _indexMap.forEach((key, value) {
-      value.forEach((key, value) {
-        processer(value);
-      });
-    });
-  }
-
-  void clean() {
-    _indexMap.clear();
-  }
-}
-
-// UTPSocket _getUTPSocket(InternetAddress remoteAddress, int remotePort,
-//     Map<InternetAddress, Map<int, UTPSocket>> map) {
-//   var m = map[remoteAddress];
-//   if (m != null) {
-//     return m[remotePort];
-//   }
-//   return null;
-// }
-
-// void _saveUTPSocket(UTPSocket s, InternetAddress address, int port,
-//     Map<InternetAddress, Map<int, UTPSocket>> map) {
-//   map[address] ??= <int, UTPSocket>{};
-//   var m = map[address];
-//   m[port] = s;
-// }
-
 dynamic _validatePackage(UTPData packageData, UTPSocket receiver) {
   if (packageData.connectionId != receiver._receiveId) {
-    return 'Connection id invalidate';
+    return 'Connection id not match';
   }
   return null;
 }
 
-// void _processReceiveDatagram(RawDatagramSocket rawSocket) {
-//   var datagram = rawSocket.receive();
-//   var address = datagram.address;
-//   var port = datagram.port;
-//   var data = datagram.data;
-//   UTPData packageData;
-//   try {
-//     packageData = parseData(data);
-//   } catch (e) {
-//     dev.log('Parse receive data error :',
-//         error: e, name: 'utp_socket.dart');
-//     return;
-//   }
+///
+/// uTP protocol receive data process
+///
+/// Include init connection and other type data process , both of Server socket and client socket
+void _processReceiveData(RawDatagramSocket rawSocket, InternetAddress address,
+    int port, Uint8List data, UTPSocket socket,
+    {void Function(UTPSocket socket) onConnected,
+    void Function(UTPSocket socket) newSocket,
+    void Function(UTPSocket socket, dynamic error) onError}) {
+  UTPData packageData;
+  try {
+    packageData = parseData(data);
+  } catch (e) {
+    socket?._receiveError(e);
+    if (onError != null) onError(socket, e);
+    dev.log('Parse receive data error :', error: e, name: 'utp_socket.dart');
+    return;
+  }
 
-//   var socket = _getUTPSocket(address, port, _utpSocketIndexMap);
-//   if (socket != null) {
-//     if (packageData.type == ST_DATA) {
-//       var error = _validatePackage(packageData, socket);
-//       if (error != null) {
-//         dev.log('Remote connect error:',
-//             error: error, name: runtimeType.toString());
-//         socket.close();
-//         return;
-//       }
-//       socket._lastRemoteTimestamp = packageData.timestamp;
-//       socket._currentLocalAck = packageData.seq_nr;
-//       // 远程第二次发送信息确认连接
-//       if (socket._connectState == _UTPSocketConnectState.SYN_RECV) {
-//         socket._connectState = _UTPSocketConnectState.CONNECTED;
-//         _sc?.add(socket);
-//         return;
-//       }
-//       // 已连接状态下收到数据后去掉header，把payload以事件发出
-//       if (socket._connectState == _UTPSocketConnectState.CONNECTED) {
-//         if (packageData.payload == null || packageData.payload.isEmpty) {
-//           return;
-//         }
-//         var data = packageData.payload.sublist(packageData.offset);
-//         socket._receive(data);
-//         return;
-//       }
-//     }
-//     return;
-//   } else {
-//     // 远程发起连接
-//     if (packageData.type == ST_SYN) {
-//       var utp = _UTPSocket(_socket.address, _socket.port, address, port);
-//       utp._socket = _socket;
-//       _saveUTPSocket(utp, address, port, _utpSocketIndexMap);
-//       // init receive_id and sent_id
-//       utp._receiveId = packageData.connectionId + 1;
-//       utp._sendId = packageData.connectionId; // 保证发送的conn id一致
-//       utp._currentLocalSeq = Random().nextInt(65535); // 随机一个发送序列
-//       utp._currentLocalAck = packageData.seq_nr;
-//       utp._connectState = _UTPSocketConnectState.SYN_RECV; // 更改连接状态
-//       utp._lastRemoteTimestamp = packageData.timestamp;
-//       utp._sendRawData(ST_STATE);
-//       return;
-//     }
-//   }
-// }
+  if (socket != null) {
+    if (socket.isClosed) {
+      var err = 'Socket closed can not process receive data';
+      if (onError != null) onError(socket, err);
+      dev.log('Process receive data error :',
+          error: err, name: 'utp_socket.dart');
+      return;
+    }
+    var error = _validatePackage(packageData, socket);
+    if (error != null) {
+      socket._receiveError(error);
+      if (onError != null) onError(socket, e);
+      dev.log('Remote connect error:', error: error, name: 'utp_socket.dart');
+      return;
+    }
+    socket._lastRemoteTimestamp = packageData.timestamp;
+    socket._currentLocalAck = packageData.seq_nr;
+    if (packageData.type == ST_STATE) {
+      if (socket._connectState == _UTPSocketConnectState.SYN_SENT) {
+        socket._connectState = _UTPSocketConnectState.CONNECTED;
+        socket._sendRawData(ST_DATA);
+        if (onConnected != null) onConnected(socket);
+        return;
+      }
+    }
+    if (packageData.type == ST_DATA) {
+      // 远程第二次发送信息确认连接
+      if (socket._connectState == _UTPSocketConnectState.SYN_RECV) {
+        socket._connectState = _UTPSocketConnectState.CONNECTED;
+        if (onConnected != null) onConnected(socket);
+        return;
+      }
+      // 已连接状态下收到数据后去掉header，把payload以事件发出
+      if (socket._connectState == _UTPSocketConnectState.CONNECTED) {
+        if (packageData.payload == null || packageData.payload.isEmpty) {
+          return;
+        }
+        var data = packageData.payload.sublist(packageData.offset);
+        socket._receive(data);
+        return;
+      } else {
+        var err = 'UTP socket is not connected, cant process ST_DATA';
+        socket._receiveError(err);
+        if (onError != null) onError(socket, err);
+        dev.log('process receive data error:',
+            error: err, name: 'utp_socket.dart');
+      }
+    }
+    return;
+  } else {
+    // 远程发起连接
+    if (packageData.type == ST_SYN) {
+      socket = _UTPSocket(rawSocket.address, rawSocket.port, address, port);
+      socket._socket = rawSocket;
+      if (newSocket != null) newSocket(socket);
+      // init receive_id and sent_id
+      socket._receiveId = packageData.connectionId + 1;
+      socket._sendId = packageData.connectionId; // 保证发送的conn id一致
+      socket._currentLocalSeq = Random().nextInt(65535); // 随机一个发送序列
+      socket._currentLocalAck = packageData.seq_nr;
+      socket._connectState = _UTPSocketConnectState.SYN_RECV; // 更改连接状态
+      socket._lastRemoteTimestamp = packageData.timestamp;
+      socket._sendRawData(ST_STATE);
+      return;
+    }
+  }
+}
