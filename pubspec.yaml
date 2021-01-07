@@ -1,6 +1,6 @@
 name: utp
 description: uTP library wirtten by Dart. It implements BitTorren BEP0029 Specification.
-version: 0.0.1
+version: 0.1.0
 repository: https://github.com/eclipseglory/utp
 issue_tracker : https://github.com/eclipseglory/utp/issues
 publish_to: https://pub.dev/
