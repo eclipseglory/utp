@@ -1,5 +1,9 @@
 import 'dart:typed_data';
 
+const MAX_UINT16 = 65535;
+
+const MAX_UINT32 = 4294967295;
+
 /// The current version is 1.
 const VERSION = 1;
 
@@ -151,17 +155,16 @@ Uint8List createData(int type, int connectionId, int timestamp,
     {int version = VERSION, Extension dataExtension, Uint8List payload}) {
   assert(type <= 15 && type >= 0, 'Bad type');
   assert(version <= 15 && version >= 0, 'Bad version');
-  assert(connectionId != null && connectionId <= 65535, 'Bad connection id');
-  assert(wnd_size != null && wnd_size <= 4294967295, 'Bad wnd_size');
-  assert(seq_nr != null && seq_nr <= 65535, 'Bad seq_nr');
-  assert(ack_nr != null && ack_nr <= 65535, 'Bad ack_nr');
+  assert(
+      connectionId != null && connectionId <= MAX_UINT16, 'Bad connection id');
+  assert(wnd_size != null && wnd_size <= MAX_UINT32, 'Bad wnd_size');
+  assert(seq_nr != null && seq_nr <= MAX_UINT16, 'Bad seq_nr');
+  assert(ack_nr != null && ack_nr <= MAX_UINT16, 'Bad ack_nr');
   assert(timestamp != null && timestamp >= 0, 'Bad timestamp');
-  if (timestamp > 4294967295) timestamp = timestamp.remainder(4294967295);
+  timestamp &= MAX_UINT32;
   assert(
       timestampDifference != null && timestampDifference >= 0, 'Bad timestamp');
-  if (timestampDifference > 4294967295) {
-    timestampDifference = timestampDifference.remainder(4294967295);
-  }
+  timestampDifference &= MAX_UINT32;
 
   var offset = 2;
   Uint8List bytes;
@@ -227,8 +230,4 @@ UTPData parseData(Uint8List data) {
       dataExtension: dataExtension,
       payload: data,
       offset: offset + 18);
-}
-
-int getNowTimeStamp() {
-  return DateTime.now().millisecondsSinceEpoch.remainder(4294967295);
 }

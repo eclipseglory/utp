@@ -1,5 +1,3 @@
-import 'dart:io';
-
 import 'utp_protocol_implement.dart';
 
 ///
@@ -10,47 +8,35 @@ import 'utp_protocol_implement.dart';
 ///
 /// This mixin use two simple `Map` to record the socket instance currentlly
 mixin UTPSocketRecorder {
-  final Map<InternetAddress, Map<int, UTPSocket>> _indexMap = {};
+  final Map<int, UTPSocket> indexMap = {};
 
-  /// Get the `UTPSocket` via [remoteAddress] and [remotePort]
+  /// Get the `UTPSocket` via [connectionId]
   ///
   /// If not found , return `null`
-  UTPSocket findUTPSocket(InternetAddress remoteAddress, int remotePort) {
-    var m = _indexMap[remoteAddress];
-    if (m != null) {
-      return m[remotePort];
-    }
-    return null;
+  UTPSocket findUTPSocket(int connectionId) {
+    return indexMap[connectionId];
   }
 
-  /// Record the `UTPSocket` via [remoteAddress] and [remotePort].
+  /// Record the `UTPSocket` via [connectionId]
   ///
   /// If it have a instance already , it will replace it with the new instance
-  void recordUTPSocket(UTPSocket s, InternetAddress address, int port) {
-    _indexMap[address] ??= <int, UTPSocket>{};
-    var m = _indexMap[address];
-    m[port] = s;
+  void recordUTPSocket(int connectionId, UTPSocket s) {
+    indexMap[connectionId] = s;
   }
 
-  UTPSocket _removeUTPSocket(InternetAddress remoteAddress, int remotePort) {
-    var m = _indexMap[remoteAddress];
-    if (m != null) {
-      return m.remove(remotePort);
-    }
-    return null;
+  UTPSocket _removeUTPSocket(int connectionId) {
+    return indexMap.remove(connectionId);
   }
 
   /// For each
   void forEach(void Function(UTPSocket socket) processer) {
-    _indexMap.forEach((key, value) {
-      value.forEach((key, value) {
-        processer(value);
-      });
+    indexMap.forEach((key, value) {
+      processer(value);
     });
   }
 
   /// clean the record map
   void clean() {
-    _indexMap.clear();
+    indexMap.clear();
   }
 }
