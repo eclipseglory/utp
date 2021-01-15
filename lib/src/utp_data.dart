@@ -104,9 +104,7 @@ class UTPPacket {
     assert(ack_nr != null, 'Bad ack_nr');
     ack_nr &= MAX_UINT16;
     assert(timestamp != null, 'Bad timestamp');
-    timestamp &= MAX_UINT16;
-    assert(timestampDifference != null, 'Bad timestamp');
-    timestampDifference &= MAX_UINT16;
+    assert(timestampDifference != null, 'Bad time difference');
   }
 
   void addExtension(Extension ext) {
@@ -127,7 +125,7 @@ class UTPPacket {
     int wndSize = 0,
   }) {
     return UTPPacket(
-        ST_STATE, connId, getNowTime16(), timeDifferent, wndSize, seq, ack);
+        ST_STATE, connId, getNowTime53(), timeDifferent, wndSize, seq, ack);
   }
 
   factory UTPPacket.newSYN(
@@ -138,7 +136,7 @@ class UTPPacket {
     int wndSize = 0,
   }) {
     return UTPPacket(
-        ST_SYN, connId, getNowTime16(), timeDifferent, wndSize, seq, ack);
+        ST_SYN, connId, getNowTime53(), timeDifferent, wndSize, seq, ack);
   }
 
   factory UTPPacket.newData(
@@ -150,7 +148,7 @@ class UTPPacket {
     int wndSize = 0,
   }) {
     return UTPPacket(
-        ST_DATA, connId, getNowTime16(), timeDifferent, wndSize, seq, ack,
+        ST_DATA, connId, getNowTime53(), timeDifferent, wndSize, seq, ack,
         payload: payload);
   }
 
@@ -160,11 +158,9 @@ class UTPPacket {
   /// different timestamp.
   Uint8List getBytes({int time, int wndSize, int timeDiff, int seq, int ack}) {
     timestamp = time ?? timestamp;
-    timestamp &= MAX_UINT16;
     wnd_size = wndSize ?? wnd_size;
     wnd_size &= MAX_UINT32;
     timestampDifference = timeDiff ?? timestampDifference;
-    timestampDifference &= MAX_UINT16;
     seq_nr = seq ?? seq_nr;
     seq_nr &= MAX_UINT16;
     ack_nr = ack ?? ack_nr;
@@ -176,8 +172,8 @@ class UTPPacket {
           payload: payload, extensions: extensionList);
     } else {
       var view = ByteData.view(_bytes.buffer);
-      view.setUint32(4, timestamp);
-      view.setUint32(8, timestampDifference);
+      view.setUint32(4, timestamp & MAX_UINT16);
+      view.setUint32(8, timestampDifference & MAX_UINT16);
       view.setUint32(12, wnd_size);
       view.setUint16(16, seq_nr);
       view.setUint16(18, ack_nr);
@@ -252,8 +248,6 @@ Uint8List _createData(int type, int connectionId, int timestamp,
   ack_nr &= MAX_UINT16;
   seq_nr &= MAX_UINT16;
   wnd_size &= MAX_UINT32;
-  timestamp &= MAX_UINT16;
-  timestampDifference &= MAX_UINT16;
 
   Uint8List bytes;
   ByteData view;
@@ -283,8 +277,8 @@ Uint8List _createData(int type, int connectionId, int timestamp,
 
   bytes[0] = (type * 16 | version);
   view.setUint16(2, connectionId);
-  view.setUint32(4, timestamp);
-  view.setUint32(8, timestampDifference);
+  view.setUint32(4, timestamp & MAX_UINT16);
+  view.setUint32(8, timestampDifference & MAX_UINT16);
   view.setUint32(12, wnd_size);
   view.setUint16(16, seq_nr);
   view.setUint16(18, ack_nr);
@@ -342,7 +336,7 @@ String intToRadix2String(int i) {
   return str;
 }
 
-/// Get 16bit timestamp
-int getNowTime16() {
-  return DateTime.now().millisecondsSinceEpoch & MAX_UINT16;
+/// Get 53bit timestamp
+int getNowTime53() {
+  return DateTime.now().microsecondsSinceEpoch;
 }
