@@ -1,6 +1,6 @@
+import 'dart:math';
 import 'dart:typed_data';
 
-import 'package:dartorrent_common/dartorrent_common.dart';
 import 'package:utp/src/utp_data.dart';
 import 'package:test/test.dart';
 
@@ -14,7 +14,7 @@ void main() {
       var header = parseData(data);
       assert(header.type == ST_RESET);
       assert(header.version == VERSION);
-      assert(header.timestamp == time & 4294967295);
+      assert(header.timestamp == time & MAX_UINT16);
       assert(header.timestampDifference == 2);
       assert(header.wnd_size == 3);
       assert(header.seq_nr == 4);
@@ -23,15 +23,12 @@ void main() {
 
     test(' only header with extension create/parse', () {
       var time = DateTime.now().millisecondsSinceEpoch;
-      var extPayload = Uint8List.fromList(randomBytes(20));
-      var ext = Extension(2, extPayload.length, extPayload);
       var packet = UTPPacket(ST_RESET, 1, time, 2, 3, 4, 5);
       var data = packet.getBytes();
-      assert(data.length == 21 + extPayload.length);
       var header = parseData(data);
       assert(header.type == ST_RESET);
       assert(header.version == VERSION);
-      assert(header.timestamp == time & 4294967295);
+      assert(header.timestamp == time & MAX_UINT16);
       assert(header.timestampDifference == 2);
       assert(header.wnd_size == 3);
       assert(header.seq_nr == 4);
@@ -41,15 +38,12 @@ void main() {
 
     test(' only header with extension create/parse 2', () {
       var time = DateTime.now().millisecondsSinceEpoch;
-      var extPayload = Uint8List.fromList(randomBytes(26));
-      var ext = Extension(2, 12, extPayload, 1);
       var packet = UTPPacket(ST_RESET, 1, time, 2, 3, 4, 5);
       var data = packet.getBytes();
-      assert(data.length == 21 + 13 - 1);
       var header = parseData(data);
       assert(header.type == ST_RESET);
       assert(header.version == VERSION);
-      assert(header.timestamp == time & 4294967295);
+      assert(header.timestamp == time & MAX_UINT16);
       assert(header.timestampDifference == 2);
       assert(header.wnd_size == 3);
       assert(header.seq_nr == 4);
@@ -94,4 +88,12 @@ void main() {
       }
     });
   });
+}
+
+List<int> randomBytes(int a) {
+  var l = <int>[];
+  for (var i = 0; i < a; i++) {
+    l.add(Random().nextInt(256));
+  }
+  return l;
 }

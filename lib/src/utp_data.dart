@@ -117,41 +117,6 @@ class UTPPacket {
     _bytes = null;
   }
 
-  factory UTPPacket.newAck(
-    int connId,
-    int seq,
-    int ack, {
-    int timeDifferent = 0,
-    int wndSize = 0,
-  }) {
-    return UTPPacket(
-        ST_STATE, connId, getNowTime53(), timeDifferent, wndSize, seq, ack);
-  }
-
-  factory UTPPacket.newSYN(
-    int connId,
-    int seq,
-    int ack, {
-    int timeDifferent = 0,
-    int wndSize = 0,
-  }) {
-    return UTPPacket(
-        ST_SYN, connId, getNowTime53(), timeDifferent, wndSize, seq, ack);
-  }
-
-  factory UTPPacket.newData(
-    int connId,
-    int seq,
-    int ack,
-    Uint8List payload, {
-    int timeDifferent = 0,
-    int wndSize = 0,
-  }) {
-    return UTPPacket(
-        ST_DATA, connId, getNowTime53(), timeDifferent, wndSize, seq, ack,
-        payload: payload);
-  }
-
   /// generate bytes buffer
   ///
   /// [time] is the timestamp , sometimes we need get a new bytes buffer with
@@ -179,6 +144,45 @@ class UTPPacket {
       view.setUint16(18, ack_nr);
     }
     return _bytes;
+  }
+
+  @override
+  int get hashCode => seq_nr.toString().hashCode;
+
+  @override
+  bool operator ==(b) {
+    if (b is UTPPacket) {
+      return b.seq_nr == seq_nr;
+    }
+    return false;
+  }
+
+  bool operator <(b) {
+    if (b is UTPPacket) {
+      return compareSeqLess(seq_nr, b.seq_nr);
+    }
+    throw 'Different type can not compare';
+  }
+
+  bool operator >=(b) {
+    if (b is UTPPacket) {
+      return !(this < b);
+    }
+    throw 'Different type can not compare';
+  }
+
+  bool operator >(b) {
+    if (b is UTPPacket) {
+      return this >= b && this != b;
+    }
+    throw 'Different type can not compare';
+  }
+
+  bool operator <=(b) {
+    if (b is UTPPacket) {
+      return !(this > b);
+    }
+    throw 'Different type can not compare';
   }
 }
 
@@ -339,4 +343,20 @@ String intToRadix2String(int i) {
 /// Get 53bit timestamp
 int getNowTime53() {
   return DateTime.now().microsecondsSinceEpoch;
+}
+
+// compare if lhs is less than rhs, taking wrapping
+// into account. if lhs is close to UINT_MAX and rhs
+// is close to 0, lhs is assumed to have wrapped and
+// considered smaller
+bool compareSeqLess(int left, int right) {
+  // distance walking from lhs to rhs, downwards
+  var dist_down = (left - right) & MAX_UINT16;
+  // distance walking from lhs to rhs, upwards
+  var dist_up = (right - left) & MAX_UINT16;
+
+  // if the distance walking up is shorter, lhs
+  // is less than rhs. If the distance walking down
+  // is shorter, then rhs is less than lhs
+  return dist_up < dist_down;
 }
