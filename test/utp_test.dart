@@ -14,7 +14,7 @@ void main() {
       var header = parseData(data);
       assert(header.type == ST_RESET);
       assert(header.version == VERSION);
-      assert(header.timestamp == time & MAX_UINT16);
+      assert(header.sendTime == time & MAX_UINT16);
       assert(header.timestampDifference == 2);
       assert(header.wnd_size == 3);
       assert(header.seq_nr == 4);
@@ -28,7 +28,7 @@ void main() {
       var header = parseData(data);
       assert(header.type == ST_RESET);
       assert(header.version == VERSION);
-      assert(header.timestamp == time & MAX_UINT16);
+      assert(header.sendTime == time & MAX_UINT16);
       assert(header.timestampDifference == 2);
       assert(header.wnd_size == 3);
       assert(header.seq_nr == 4);
@@ -43,7 +43,7 @@ void main() {
       var header = parseData(data);
       assert(header.type == ST_RESET);
       assert(header.version == VERSION);
-      assert(header.timestamp == time & MAX_UINT16);
+      assert(header.sendTime == time & MAX_UINT16);
       assert(header.timestampDifference == 2);
       assert(header.wnd_size == 3);
       assert(header.seq_nr == 4);
@@ -73,7 +73,7 @@ void main() {
 
       assert(packet1.type == packet.type);
       assert(packet1.version == VERSION);
-      assert(packet1.timestamp == packet.timestamp);
+      assert(packet1.sendTime == packet.sendTime);
       assert(packet1.timestampDifference == packet.timestampDifference);
       assert(packet1.wnd_size == packet.wnd_size);
       assert(packet1.seq_nr == packet.seq_nr);

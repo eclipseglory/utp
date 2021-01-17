@@ -27,7 +27,7 @@ void main() async {
     });
   });
 
-  var pool = UTPSocketPool();
+  var pool = UTPSocketClient();
   var s1 = await pool.connect(InternetAddress.tryParse('127.0.0.1'), port);
   print(
       'connect ${s1.remoteAddress.address}:${s1.remotePort}[${s1.connectionId}] successfully');

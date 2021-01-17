@@ -23,7 +23,7 @@ void main() async {
     });
   });
 
-  var pool = UTPSocketPool();
+  var pool = UTPSocketClient();
   s2 = await pool.connect(InternetAddress.tryParse('127.0.0.1'), port);
   print(
       'connect ${s2.remoteAddress.address}:${s2.remotePort}[${s2.connectionId}] successfully');

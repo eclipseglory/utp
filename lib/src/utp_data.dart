@@ -40,7 +40,7 @@ const ST_SYN = 4;
 class UTPPacket {
   /// This is the 'microseconds' parts of the timestamp of when this packet was sent.
   ///
-  int timestamp;
+  int sendTime;
 
   /// This is the difference between the local time and the timestamp in the last received packet,
   /// at the time the last packet was received.
@@ -90,7 +90,7 @@ class UTPPacket {
   /// the index `Payload` start with
   final int offset;
 
-  UTPPacket(this.type, this.connectionId, this.timestamp,
+  UTPPacket(this.type, this.connectionId, this.sendTime,
       this.timestampDifference, this.wnd_size, this.seq_nr, this.ack_nr,
       {this.version = VERSION, this.payload, this.offset = 0}) {
     assert(type <= 15 && type >= 0, 'Bad type');
@@ -103,7 +103,7 @@ class UTPPacket {
     seq_nr &= MAX_UINT16;
     assert(ack_nr != null, 'Bad ack_nr');
     ack_nr &= MAX_UINT16;
-    assert(timestamp != null, 'Bad timestamp');
+    assert(sendTime != null, 'Bad timestamp');
     assert(timestampDifference != null, 'Bad time difference');
   }
 
@@ -117,12 +117,19 @@ class UTPPacket {
     _bytes = null;
   }
 
+  void clearExtensions() {
+    if (extensionList.isNotEmpty) {
+      extensionList.clear();
+      _bytes = null;
+    }
+  }
+
   /// generate bytes buffer
   ///
   /// [time] is the timestamp , sometimes we need get a new bytes buffer with
   /// different timestamp.
   Uint8List getBytes({int time, int wndSize, int timeDiff, int seq, int ack}) {
-    timestamp = time ?? timestamp;
+    sendTime = time ?? sendTime;
     wnd_size = wndSize ?? wnd_size;
     wnd_size &= MAX_UINT32;
     timestampDifference = timeDiff ?? timestampDifference;
@@ -132,13 +139,13 @@ class UTPPacket {
     ack_nr &= MAX_UINT16;
 
     if (_bytes == null) {
-      _bytes ??= _createData(type, connectionId, timestamp, timestampDifference,
+      _bytes ??= _createData(type, connectionId, sendTime, timestampDifference,
           wnd_size, seq_nr, ack_nr,
           payload: payload, extensions: extensionList);
     } else {
       var view = ByteData.view(_bytes.buffer);
-      view.setUint32(4, timestamp & MAX_UINT16);
-      view.setUint32(8, timestampDifference & MAX_UINT16);
+      view.setUint32(4, sendTime & MAX_UINT32);
+      view.setUint32(8, timestampDifference & MAX_UINT32);
       view.setUint32(12, wnd_size);
       view.setUint16(16, seq_nr);
       view.setUint16(18, ack_nr);
@@ -281,8 +288,8 @@ Uint8List _createData(int type, int connectionId, int timestamp,
 
   bytes[0] = (type * 16 | version);
   view.setUint16(2, connectionId);
-  view.setUint32(4, timestamp & MAX_UINT16);
-  view.setUint32(8, timestampDifference & MAX_UINT16);
+  view.setUint32(4, timestamp & MAX_UINT32);
+  view.setUint32(8, timestampDifference & MAX_UINT32);
   view.setUint32(12, wnd_size);
   view.setUint16(16, seq_nr);
   view.setUint16(18, ack_nr);
@@ -341,8 +348,9 @@ String intToRadix2String(int i) {
 }
 
 /// Get 53bit timestamp
-int getNowTime53() {
-  return DateTime.now().microsecondsSinceEpoch;
+int getNowTimestamp([int offset = 0]) {
+  offset ??= 0;
+  return DateTime.now().microsecondsSinceEpoch - offset;
 }
 
 // compare if lhs is less than rhs, taking wrapping
