@@ -494,7 +494,7 @@ class _UTPSocket extends UTPSocket {
     return true;
   }
 
-  /// socket每次连接成功后或者发送任何消息，都会定义一个延时30秒的Timer。
+  /// socket每次连接成功后或者发送/接收任何消息（keepalive消息除外），都会定义一个延时30秒的Timer。
   ///
   /// Timer触发就会发送一次ST_STATE 消息，seq_nr为下一次发送seq，ack_nr为最后一次收到的远程seq-1
   void startKeepAlive() {
@@ -574,8 +574,9 @@ class _UTPSocket extends UTPSocket {
   /// 重发某个Packet
   void _resendPacket(int seq, [int times = 0]) {
     var packet = _inflightPackets[seq];
-    if (packet == null) return;
-    _resendTimer[seq]?.cancel();
+    if (packet == null) return _resendTimer.remove(seq)?.cancel();
+
+    _resendTimer.remove(seq)?.cancel();
     _resendTimer[seq] = Timer(Duration.zero, () {
       // print('重新发送 $seq');
       _currentWindowSize -= packet.length;
@@ -643,7 +644,6 @@ class _UTPSocket extends UTPSocket {
   ///
   void remoteAcked(int ackSeq, [List<int> selectiveAck, bool count = false]) {
     if (isClosed || !isConnected || isClosing) return;
-
     if (ackSeq > currentLocalSeq || _inflightPackets.isEmpty) return;
     var newSeqAcked = false;
     var acked = <int>[];
@@ -653,7 +653,9 @@ class _UTPSocket extends UTPSocket {
       acked.addAll(selectiveAck);
     }
     for (var i = 0; i < acked.length; i++) {
-      newSeqAcked = newSeqAcked || _ackPacket(acked[i]);
+      // 愚蠢，短路了都没看出来  :
+      // newSeqAcked = newSeqAcked || _ackPacket(acked[i]);
+      newSeqAcked = _ackPacket(acked[i]) || newSeqAcked;
     }
 
     var hasLost = false;
@@ -669,7 +671,7 @@ class _UTPSocket extends UTPSocket {
           if (_duplicateAckCountMap[key] >= 3) {
             _duplicateAckCountMap.remove(key);
             // print('$key 重复ack超过3($oldcount)次，计算丢包');
-            var over = acked.length - i - 1; //这些没有Ack的包之后有多少包被Ack了
+            var over = acked.length - i - 1;
             var limit = ((currentLocalSeq - 1 - key) & MAX_UINT16);
             limit = min(3, limit);
             if (over >= limit) {
@@ -709,23 +711,15 @@ class _UTPSocket extends UTPSocket {
     for (var i = 0; i < keys.length; i++) {
       var key = keys[i];
       if (compareSeqLess(ackSeq, key)) break;
-      newSeqAcked = newSeqAcked || _ackPacket(key);
+      newSeqAcked = _ackPacket(key) || newSeqAcked;
     }
     if (hasLost) {
-      dev.log('有丢包', name: runtimeType.toString());
+      dev.log('Lost packet, fix window size and packet size',
+          name: runtimeType.toString());
       _allowWindowSize = _allowWindowSize ~/ 2;
       if (_packetSize > _allowWindowSize) _packetSize = _allowWindowSize;
     }
-    // if (changeSize) {
-    //   _packetSize *= 2;
-    //   _packetSize = min(_packetSize, MAX_PACKET_SIZE);
 
-    //   _allowWindowSize *= 2;
-    //   _allowWindowSize = min(_allowWindowSize, maxWindowSize);
-    //   print('更改packet size: $_packetSize , max window : $_allowWindowSize');
-    // }
-
-    // 清楚无用的duplicate ack计数器
     if (_inflightPackets.isEmpty && _duplicateAckCountMap.isNotEmpty) {
       _duplicateAckCountMap.clear();
     } else {
@@ -1085,7 +1079,7 @@ void _processFINMessage(_UTPSocket socket, UTPPacket packetData) async {
 /// 每次收到SYN消息，都要新建一个连接。但是如果该连接ID已经有对应的[socket]，那就应该通知对方Reset
 void _processSYNMessage(_UTPSocket socket, RawDatagramSocket rawSocket,
     InternetAddress remoteAddress, int remotePort, UTPPacket packetData,
-    [void Function(UTPSocket socket) newSocket]) {
+    [void Function(_UTPSocket socket) newSocket]) {
   if (socket != null) {
     _sendResetMessage(
         packetData.connectionId, rawSocket, remoteAddress, remotePort);
@@ -1094,17 +1088,18 @@ void _processSYNMessage(_UTPSocket socket, RawDatagramSocket rawSocket,
         name: 'utp_protocol_implement');
     return;
   }
-  socket =
-      _UTPSocket(packetData.connectionId, rawSocket, remoteAddress, remotePort);
+  var connId = (packetData.connectionId + 1) & MAX_UINT16;
+  socket = _UTPSocket(connId, rawSocket, remoteAddress, remotePort);
   // init receive_id and sent_id
-  socket.receiveId = (packetData.connectionId + 1) & MAX_UINT16;
+  socket.receiveId = connId;
   socket.sendId = packetData.connectionId; // 保证发送的conn id一致
   socket.currentLocalSeq = Random().nextInt(MAX_UINT16); // 随机seq
   socket.connectionState = UTPConnectState.SYN_RECV; // 更改连接状态
   socket.lastRemoteSeq = packetData.seq_nr;
   socket.remoteWndSize = packetData.wnd_size;
   socket.lastRemotePktTimestamp = packetData.sendTime;
-  socket.requestSendAck();
+  var packet = socket.newAckPacket();
+  socket.sendPacket(packet, 0, false, false);
   if (newSocket != null) newSocket(socket);
   return;
 }
@@ -1136,8 +1131,8 @@ List<int> _readSelectiveAcks(UTPPacket packetData) {
 ///
 /// 对于处于SYN_RECV的socket来说，此时收到消息如果序列号正确，那就是真正连接成功
 void _processDataMessage(_UTPSocket socket, UTPPacket packetData,
-    [void Function(UTPSocket) onConnected,
-    void Function(UTPSocket source, dynamic error) onError]) {
+    [void Function(_UTPSocket) onConnected,
+    void Function(_UTPSocket source, dynamic error) onError]) {
   var selectiveAcks = _readSelectiveAcks(packetData);
   if (socket.connectionState == UTPConnectState.SYN_RECV &&
       (socket.currentLocalSeq - 1) & MAX_UINT16 == packetData.ack_nr) {
