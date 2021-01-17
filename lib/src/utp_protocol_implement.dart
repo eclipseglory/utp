@@ -11,7 +11,12 @@ const MAX_PACKET_SIZE = 1382;
 const MIN_PACKET_SIZE = 150;
 
 ///
+/// UTP socket client.
 ///
+/// This class can connect remote UTP socket. One UTPSocketClient
+/// can create multiple UTPSocket.
+///
+/// See also [ServerUTPSocket]
 class UTPSocketClient extends _UTPCloseHandler with UTPSocketRecorder {
   bool _closed = false;
 
@@ -59,7 +64,7 @@ class UTPSocketClient extends _UTPCloseHandler with UTPSocketRecorder {
     utp.receiveId = connId; //初始一个随机的connection id
     utp.sendId = (utp.receiveId + 1) & MAX_UINT16;
     utp.sendId &= MAX_UINT16; // 防止溢出
-    utp.currentLocalSeq = 1;
+    utp.currentLocalSeq = Random().nextInt(MAX_UINT16); // 随机一个seq;
     utp.lastRemoteSeq = 0; // 这个设为0，起始是没有得到远程seq的
     utp.lastRemotePktTimestamp = 0;
     var packet = UTPPacket(ST_SYN, connId, 0, 0, utp.maxWindowSize,
@@ -106,6 +111,7 @@ class UTPSocketClient extends _UTPCloseHandler with UTPSocketRecorder {
     dev.log('UDP socket error:', error: e, name: runtimeType.toString());
   }
 
+  /// Close the raw UDP socket and all UTP sockets
   Future close([dynamic reason]) async {
     if (isClosed) return;
     _closed = true;
@@ -133,6 +139,10 @@ class UTPSocketClient extends _UTPCloseHandler with UTPSocketRecorder {
   }
 }
 
+///
+/// This class will create a UTP socket to listening income UTP socket.
+///
+/// See also [UTPSocketClient]
 abstract class ServerUTPSocket extends _UTPCloseHandler {
   int get port;
 
@@ -1020,6 +1030,7 @@ class _UTPSocket extends UTPSocket {
     _sendingDataBuffer?.clear();
     _keepAliveTimer?.cancel();
 
+    Timer.run(() => _handler?.socketClosed(this));
     return;
   }
 }
@@ -1129,7 +1140,7 @@ void _processDataMessage(_UTPSocket socket, UTPPacket packetData,
     void Function(UTPSocket source, dynamic error) onError]) {
   var selectiveAcks = _readSelectiveAcks(packetData);
   if (socket.connectionState == UTPConnectState.SYN_RECV &&
-      socket.currentLocalSeq - 1 == packetData.ack_nr) {
+      (socket.currentLocalSeq - 1) & MAX_UINT16 == packetData.ack_nr) {
     socket.connectionState = UTPConnectState.CONNECTED;
     socket.startKeepAlive();
     socket.remoteWndSize = packetData.wnd_size;
@@ -1161,7 +1172,7 @@ void _processStateMessage(_UTPSocket socket, UTPPacket packetData,
     void Function(_UTPSocket source, dynamic error) onError]) {
   var selectiveAcks = _readSelectiveAcks(packetData);
   if (socket.connectionState == UTPConnectState.SYN_SENT &&
-      socket.currentLocalSeq - 1 == packetData.ack_nr) {
+      (socket.currentLocalSeq - 1) & MAX_UINT16 == packetData.ack_nr) {
     socket.connectionState = UTPConnectState.CONNECTED;
     socket.lastRemoteSeq = packetData.seq_nr;
     socket.lastRemoteSeq--;
