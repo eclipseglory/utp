@@ -20,6 +20,9 @@ void main() async {
       if (str == 'uTP') {
         socket.add(Uint8List.fromList('Protocol'.codeUnits));
       }
+    }, onDone: () {
+      print(
+          'Remote ${socket.remoteAddress.address}:${socket.remotePort}[${socket.connectionId}] closed');
     });
   });
 
@@ -30,8 +33,9 @@ void main() async {
   s1.listen((datas) {
     print(
         'Receive "${String.fromCharCodes(datas)}" from ${s1.remoteAddress.address}:${s1.remotePort}[${s1.connectionId}] ');
-  });
+  }, onDone: () => print('close self'));
   s1.add(Uint8List.fromList('Hello'.codeUnits));
+  s1.close();
 
   var s2 = await pool.connect(InternetAddress.tryParse('127.0.0.1'), port);
   print(

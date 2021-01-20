@@ -16,3 +16,6 @@
 - Can process FIN message
 - Change the window size caculator
 - Use dymanic window size and packet size to control data sending
+
+## 0.2.1
+- Fix FIN message bug
