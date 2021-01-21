@@ -1,6 +1,6 @@
 name: utp
 description: uTorrent Transport Protocol (BEP0029 specification) library implemented by pure Dart.
-version: 0.3.0
+version: 0.3.1
 repository: https://github.com/eclipseglory/utp
 issue_tracker : https://github.com/eclipseglory/utp/issues
 publish_to: https://pub.dev/

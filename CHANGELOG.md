@@ -24,3 +24,7 @@
 - Change FIN message process logic
 - Process RESET message
 - Write README
+
+
+## 0.3.1
+- Fix UTP packet parse bug

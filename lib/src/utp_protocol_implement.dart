@@ -840,7 +840,7 @@ class _UTPSocket extends UTPSocket {
   @override
   void write(Object obj) {
     var str = obj?.toString();
-    if (str != null) add(encoding.encode(str));
+    if (str != null && str.isNotEmpty) add(encoding.encode(str));
   }
 
   @override
@@ -852,7 +852,7 @@ class _UTPSocket extends UTPSocket {
       var str = obj?.toString();
       if (str == null) continue;
       s = '$s$str';
-      if (i < objects.length - 1) s += separator;
+      if (i < objects.length - 1 && separator.isNotEmpty) s += separator;
     }
     write(s);
   }
@@ -867,7 +867,7 @@ class _UTPSocket extends UTPSocket {
   @override
   void writeln([Object obj = '']) {
     var str = obj?.toString();
-    if (str == null) return;
+    if (str == null || str.isEmpty) return;
     str = '$str\n';
     write(str);
   }
@@ -969,8 +969,6 @@ class _UTPSocket extends UTPSocket {
       acked.addAll(selectiveAck);
     }
     for (var i = 0; i < acked.length; i++) {
-      // 愚蠢，短路了都没看出来  :
-      // newSeqAcked = newSeqAcked || _ackPacket(acked[i]);
       newSeqAcked = _ackPacket(acked[i]) || newSeqAcked;
     }
 
@@ -1286,12 +1284,12 @@ class _UTPSocket extends UTPSocket {
   ///
   /// 此方法会在close的时候调用
   void _sendFIN() {
-    if (isClosed || _finSended) return null;
+    if (isClosed || _finSended) return;
     var packet =
         UTPPacket(ST_FIN, sendId, 0, 0, 0, currentLocalSeq, lastRemoteSeq);
     sendPacket(packet, 0, false, true);
     _finSended = true;
-    return null;
+    return;
   }
 
   void _startCountDownFINData([int times = 0]) {
@@ -1310,7 +1308,6 @@ class _UTPSocket extends UTPSocket {
     var expectFinal = (lastRemoteSeq + 1) & MAX_UINT32;
     if (compareSeqLess(expectFinal, finalSeq) || expectFinal == finalSeq) {
       _finalRemoteFINSeq = finalSeq;
-      // 半关闭状态
       connectionState = UTPConnectState.CLOSING;
     }
   }

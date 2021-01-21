@@ -1,3 +1,4 @@
+import 'dart:developer';
 import 'dart:typed_data';
 
 const MAX_UINT16 = 65535;
@@ -88,7 +89,7 @@ class UTPPacket {
   /// Sometimes, the whole data bytes with `Header`(include `Extension`) and `Payload`,
   /// so it need not to split `Payload` into a new buffer. This field record
   /// the index `Payload` start with
-  final int offset;
+  int offset;
 
   UTPPacket(this.type, this.connectionId, this.sendTime,
       this.timestampDifference, this.wnd_size, this.seq_nr, this.ack_nr,
@@ -326,21 +327,21 @@ UTPPacket parseData(List<int> datas) {
   var offset = 20;
   var packet = UTPPacket(type, cid, ts, tsd, wnd, seq, ack,
       version: version, payload: data, offset: offset);
-  var index = 20;
   while (nextExt != 0) {
     Extension ext;
     if (nextExt == 1) {
-      var len = view.getUint8(index + 1);
-      ext = SelectiveACK(ack, len, data, index + 2);
+      var len = view.getUint8(offset + 1);
+      ext = SelectiveACK(ack, len, data, offset + 2);
     } else {
       // unkown extension
-      var len = view.getUint8(index + 1);
-      ext = Extension(nextExt, len, data, index + 2);
+      var len = view.getUint8(offset + 1);
+      ext = Extension(nextExt, len, data, offset + 2);
     }
     packet.addExtension(ext);
-    nextExt = view.getUint8(index);
-    index += view.getUint8(index + 1) + 2;
+    nextExt = view.getUint8(offset);
+    offset += view.getUint8(offset + 1) + 2;
   }
+  packet.offset = offset;
   return packet;
 }
 
