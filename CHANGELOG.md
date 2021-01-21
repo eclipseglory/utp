@@ -19,3 +19,8 @@
 
 ## 0.2.1
 - Fix FIN message bug
+
+## 0.3.0
+- Change FIN message process logic
+- Process RESET message
+- Write README

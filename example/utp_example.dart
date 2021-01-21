@@ -1,54 +1,43 @@
 import 'dart:convert';
 import 'dart:io';
-import 'dart:typed_data';
 
 import 'package:utp/src/utp_protocol_implement.dart';
 
 void main() async {
+  int startTime;
   var ss = await ServerUTPSocket.bind(InternetAddress.anyIPv4, 0);
   var port = ss.port;
-  var count = 0;
+  var receive = <int>[];
+  var total = 1000;
   ss.listen((socket) {
     print(
-        '${socket.remoteAddress.address}:${socket.remotePort}[${socket.connectionId}] connect me');
+        '${socket.remoteAddress.address}:${socket.remotePort}[${socket.connectionId}] connected');
     socket.listen((data) {
-      var str = String.fromCharCodes(data);
-      print(
-          'Receive "$str" from ${socket.remoteAddress.address}:${socket.remotePort}[${socket.connectionId}] ,$count');
-      count++;
-      if (str == 'Hello') socket.add(Uint8List.fromList('World!'.codeUnits));
-      if (str == 'uTP') {
-        socket.add(Uint8List.fromList('Protocol'.codeUnits));
-      }
-    }, onDone: () {
+      receive.addAll(data);
+    }, onDone: () async {
+      var endTime = DateTime.now().microsecondsSinceEpoch;
+      var result = utf8.decode(receive);
+      var t = result.split('\n').where((element) => element.isNotEmpty).length;
+      assert(t == total, 'receive data error');
       print(
           'Remote ${socket.remoteAddress.address}:${socket.remotePort}[${socket.connectionId}] closed');
+      // print('Receive $t chinese , spend ${(endTime - startTime) / 1000} ms:');
+      print('receive $t chinese text: ');
+      print('$result');
+      await ss.close();
+      print('server closed');
     });
   });
 
   var pool = UTPSocketClient();
   var s1 = await pool.connect(InternetAddress.tryParse('127.0.0.1'), port);
-  print(
-      'connect ${s1.remoteAddress.address}:${s1.remotePort}[${s1.connectionId}] successfully');
-  s1.listen((datas) {
-    print(
-        'Receive "${String.fromCharCodes(datas)}" from ${s1.remoteAddress.address}:${s1.remotePort}[${s1.connectionId}] ');
-  }, onDone: () => print('close self'));
-  s1.add(Uint8List.fromList('Hello'.codeUnits));
-  s1.close();
-
-  var s2 = await pool.connect(InternetAddress.tryParse('127.0.0.1'), port);
-  print(
-      'connect ${s2.remoteAddress.address}:${s2.remotePort}[${s2.connectionId}] successfully');
-  s2.listen((datas) {
-    print(
-        'Receive "${String.fromCharCodes(datas)}" from ${s2.remoteAddress.address}:${s2.remotePort}[${s2.connectionId}] ');
-    // pool.dispose();
-  });
-  s2.add(Uint8List.fromList('uTP'.codeUnits));
-  Future.delayed(Duration(seconds: 3), () {
-    for (var i = 0; i < 10000; i++) {
-      s2.add(Uint8List.fromList(utf8.encode('$i ,')));
-    }
-  });
+  var chinese = '中文字符甲乙丙丁戊己庚辛';
+  print('send ${(chinese.length * total * 2) / 1024} kb datas');
+  for (var i = 0; i < total; i++) {
+    s1.writeln(chinese);
+  }
+  startTime = DateTime.now().microsecondsSinceEpoch;
+  await s1.close();
+  await pool.close();
+  print('client closed');
 }

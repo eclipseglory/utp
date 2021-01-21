@@ -30,7 +30,7 @@ void main() async {
   s2.listen((datas) {
     // pool.dispose();
   });
-  for (var i = 0; i < 1000; i++) {
-    s2.add(Uint8List.fromList(utf8.encode('$i 个数据')));
+  for (var i = 0; i < 10000; i++) {
+    s2.add(Uint8List.fromList(utf8.encode('$i,')));
   }
 }

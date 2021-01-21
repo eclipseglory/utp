@@ -71,7 +71,7 @@ class UTPPacket {
   int type;
 
   /// The data payload buffer
-  Uint8List payload;
+  List<int> payload;
 
   // Extensions
   List<Extension> extensionList = <Extension>[];
@@ -139,9 +139,14 @@ class UTPPacket {
     ack_nr &= MAX_UINT16;
 
     if (_bytes == null) {
-      _bytes ??= _createData(type, connectionId, sendTime, timestampDifference,
+      var d = _createData(type, connectionId, sendTime, timestampDifference,
           wnd_size, seq_nr, ack_nr,
           payload: payload, extensions: extensionList);
+      if (d is Uint8List) {
+        _bytes = d;
+      } else {
+        _bytes = Uint8List.fromList(d);
+      }
     } else {
       var view = ByteData.view(_bytes.buffer);
       view.setUint32(4, sendTime & MAX_UINT32);
@@ -203,7 +208,7 @@ class Extension {
   final int length;
 
   /// Payload data buffer.
-  final Uint8List payload;
+  final List<int> payload;
 
   /// Effect payload start from
   int start;
@@ -217,7 +222,7 @@ class Extension {
 
 class SelectiveACK extends Extension {
   final int _ack;
-  SelectiveACK(this._ack, int length, Uint8List payload, [int start = 0])
+  SelectiveACK(this._ack, int length, List<int> payload, [int start = 0])
       : super(1, length, payload, start) {
     assert(_ack != null, 'Bad ACK number');
   }
@@ -250,9 +255,9 @@ class SelectiveACK extends Extension {
   }
 }
 
-Uint8List _createData(int type, int connectionId, int timestamp,
+List<int> _createData(int type, int connectionId, int timestamp,
     int timestampDifference, int wnd_size, int seq_nr, int ack_nr,
-    {int version = VERSION, List<Extension> extensions, Uint8List payload}) {
+    {int version = VERSION, List<Extension> extensions, List<int> payload}) {
   assert(type <= 15 && type >= 0, 'Bad type');
   assert(version <= 15 && version >= 0, 'Bad version');
   connectionId &= MAX_UINT16;
@@ -297,13 +302,15 @@ Uint8List _createData(int type, int connectionId, int timestamp,
     var l = <int>[];
     l.addAll(bytes);
     l.addAll(payload);
-    return Uint8List.fromList(l);
+    return l;
   }
   return bytes;
 }
 
 /// Parse bytes [data] to `UTPData` instance
-UTPPacket parseData(Uint8List data) {
+UTPPacket parseData(List<int> datas) {
+  if (datas == null || datas.isEmpty || datas.length < 20) return null;
+  var data = Uint8List.fromList(datas);
   var view = ByteData.view(data.buffer);
   var first = data[0];
   var type = first ~/ 16;
