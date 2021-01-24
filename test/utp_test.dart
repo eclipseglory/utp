@@ -7,14 +7,14 @@ import 'package:test/test.dart';
 void main() {
   group('utp data test', () {
     test(' only header create/parse', () {
-      var time = DateTime.now().millisecondsSinceEpoch;
+      var time = DateTime.now().microsecondsSinceEpoch;
       var p = UTPPacket(ST_RESET, 1, time, 2, 3, 4, 5);
       var data = p.getBytes();
       assert(data.length == 20);
       var header = parseData(data);
       assert(header.type == ST_RESET);
       assert(header.version == VERSION);
-      assert(header.sendTime == time & MAX_UINT16);
+      assert(header.sendTime == time & MAX_UINT32);
       assert(header.timestampDifference == 2);
       assert(header.wnd_size == 3);
       assert(header.seq_nr == 4);
@@ -22,13 +22,13 @@ void main() {
     });
 
     test(' only header with extension create/parse', () {
-      var time = DateTime.now().millisecondsSinceEpoch;
+      var time = DateTime.now().microsecondsSinceEpoch;
       var packet = UTPPacket(ST_RESET, 1, time, 2, 3, 4, 5);
       var data = packet.getBytes();
       var header = parseData(data);
       assert(header.type == ST_RESET);
       assert(header.version == VERSION);
-      assert(header.sendTime == time & MAX_UINT16);
+      assert(header.sendTime == time & MAX_UINT32);
       assert(header.timestampDifference == 2);
       assert(header.wnd_size == 3);
       assert(header.seq_nr == 4);
@@ -37,13 +37,13 @@ void main() {
     });
 
     test(' only header with extension create/parse 2', () {
-      var time = DateTime.now().millisecondsSinceEpoch;
+      var time = DateTime.now().microsecondsSinceEpoch;
       var packet = UTPPacket(ST_RESET, 1, time, 2, 3, 4, 5);
       var data = packet.getBytes();
       var header = parseData(data);
       assert(header.type == ST_RESET);
       assert(header.version == VERSION);
-      assert(header.sendTime == time & MAX_UINT16);
+      assert(header.sendTime == time & MAX_UINT32);
       assert(header.timestampDifference == 2);
       assert(header.wnd_size == 3);
       assert(header.seq_nr == 4);
@@ -87,6 +87,34 @@ void main() {
         assert(ackeds1[i] == ackeds[i]);
       }
     });
+  });
+
+  test('create selective ack', () {
+    var buffer = [];
+    var lastRemoteSeq = 10;
+    var random = Random();
+    for (var i = 0; i < 32; i++) {
+      var r = random.nextInt(100);
+      if (r > 11 && !buffer.contains(r)) buffer.add(r);
+    }
+    buffer.sort((a, b) {
+      if (a > b) return 1;
+      if (a < b) return -1;
+      return 0;
+    });
+    var len = buffer.last - lastRemoteSeq;
+    var c = len ~/ 32;
+    var r = len.remainder(32);
+    if (r != 0) c++;
+    var payload = List<int>.filled(c * 32, 0);
+    var selectiveAck = SelectiveACK(lastRemoteSeq, payload.length, payload);
+    buffer.forEach((seq) {
+      selectiveAck.setAcked(seq);
+    });
+    var ackes = selectiveAck.getAckeds();
+    for (var i = 0; i < ackes.length; i++) {
+      assert(ackes[i] == buffer[i]);
+    }
   });
 }
 

@@ -1,4 +1,3 @@
-import 'dart:developer';
 import 'dart:typed_data';
 
 const MAX_UINT16 = 65535;
@@ -39,8 +38,10 @@ const ST_SYN = 4;
 
 /// uTP Packet
 class UTPPacket {
+  /// Re-send times
+  int resend = 0;
+
   /// This is the 'microseconds' parts of the timestamp of when this packet was sent.
-  ///
   int sendTime;
 
   /// This is the difference between the local time and the timestamp in the last received packet,
@@ -80,7 +81,7 @@ class UTPPacket {
   Uint8List _bytes;
 
   int get length {
-    if (payload != null) return payload.length;
+    if (payload != null) return payload.length - offset;
     return 0;
   }
 
@@ -140,14 +141,14 @@ class UTPPacket {
     ack_nr &= MAX_UINT16;
 
     if (_bytes == null) {
-      var d = _createData(type, connectionId, sendTime, timestampDifference,
-          wnd_size, seq_nr, ack_nr,
-          payload: payload, extensions: extensionList);
-      if (d is Uint8List) {
-        _bytes = d;
-      } else {
-        _bytes = Uint8List.fromList(d);
+      var p = payload;
+      if (offset != 0) {
+        p = List<int>(payload.length - offset);
+        List.copyRange(p, 0, payload, offset);
       }
+      _bytes = _createData(type, connectionId, sendTime, timestampDifference,
+          wnd_size, seq_nr, ack_nr,
+          payload: p, extensions: extensionList);
     } else {
       var view = ByteData.view(_bytes.buffer);
       view.setUint32(4, sendTime & MAX_UINT32);
@@ -256,7 +257,7 @@ class SelectiveACK extends Extension {
   }
 }
 
-List<int> _createData(int type, int connectionId, int timestamp,
+Uint8List _createData(int type, int connectionId, int timestamp,
     int timestampDifference, int wnd_size, int seq_nr, int ack_nr,
     {int version = VERSION, List<Extension> extensions, List<int> payload}) {
   assert(type <= 15 && type >= 0, 'Bad type');
@@ -268,14 +269,20 @@ List<int> _createData(int type, int connectionId, int timestamp,
 
   Uint8List bytes;
   ByteData view;
+  var payloadLen = 0;
+  var payloadStart = 20;
+  if (payload != null && payload.isNotEmpty) {
+    payloadLen = payload.length;
+  }
   if (extensions == null || extensions.isEmpty) {
-    bytes = Uint8List(20);
+    bytes = Uint8List(20 + payloadLen);
     view = ByteData.view(bytes.buffer);
     view.setUint8(1, 0); // 没有extension
   } else {
     var extlen = extensions.fold(
         0, (previousValue, element) => previousValue + element.length + 2);
-    bytes = Uint8List(20 + extlen);
+    payloadStart += extlen;
+    bytes = Uint8List(20 + extlen + payloadLen);
     view = ByteData.view(bytes.buffer);
     view.setUint8(1, extensions[0].id);
     var index = 20;
@@ -299,11 +306,8 @@ List<int> _createData(int type, int connectionId, int timestamp,
   view.setUint32(12, wnd_size);
   view.setUint16(16, seq_nr);
   view.setUint16(18, ack_nr);
-  if (payload != null && payload.isNotEmpty) {
-    var l = <int>[];
-    l.addAll(bytes);
-    l.addAll(payload);
-    return l;
+  if (payloadLen > 0) {
+    List.copyRange(bytes, payloadStart, payload);
   }
   return bytes;
 }

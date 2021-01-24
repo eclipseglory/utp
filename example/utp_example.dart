@@ -4,40 +4,44 @@ import 'dart:io';
 import 'package:utp/src/utp_protocol_implement.dart';
 
 void main() async {
+  var total = 21889;
+  var chinese = '中文字符甲乙丙丁戊己庚辛\n';
+  var port = 64476;
   int startTime;
   var ss = await ServerUTPSocket.bind(InternetAddress.anyIPv4, 0);
-  var port = ss.port;
+  port = ss.port;
+  print('[Server] start to listening at $port');
   var receive = <int>[];
-  var total = 1000;
   ss.listen((socket) {
+    startTime = DateTime.now().microsecondsSinceEpoch;
     print(
-        '${socket.remoteAddress.address}:${socket.remotePort}[${socket.connectionId}] connected');
+        '[Server] ${socket.remoteAddress.address}:${socket.remotePort}[${socket.connectionId}] connected');
     socket.listen((data) {
       receive.addAll(data);
     }, onDone: () async {
       var endTime = DateTime.now().microsecondsSinceEpoch;
+      var spendTime = (endTime - startTime) / 1000000;
       var result = utf8.decode(receive);
-      var t = result.split('\n').where((element) => element.isNotEmpty).length;
-      assert(t == total, 'receive data error');
-      print(
-          'Remote ${socket.remoteAddress.address}:${socket.remotePort}[${socket.connectionId}] closed');
-      // print('Receive $t chinese , spend ${(endTime - startTime) / 1000} ms:');
-      print('receive $t chinese text: ');
+      var totalSize = receive.length / 1024;
+      receive.clear();
       print('$result');
       await ss.close();
-      print('server closed');
+      print(
+          '[Server] Remote ${socket.remoteAddress.address}:${socket.remotePort}[${socket.connectionId}] closed,so close server too');
+      print(
+          '[Server] Server closed. Receive $totalSize kb datas , speed ${(totalSize / spendTime).toStringAsFixed(3)} kb/s');
     });
   });
 
   var pool = UTPSocketClient();
   var s1 = await pool.connect(InternetAddress.tryParse('127.0.0.1'), port);
-  var chinese = '中文字符甲乙丙丁戊己庚辛';
-  print('send ${(chinese.length * total * 2) / 1024} kb datas');
+  var cbys = utf8.encode(chinese).length;
+  print(
+      '[Client] Connect ${s1.remoteAddress.address}:${s1.remotePort}[${s1.connectionId}] successfully. Start to send ${(total * cbys) / 1024}kb datas');
   for (var i = 0; i < total; i++) {
-    s1.writeln(chinese);
+    s1.write(chinese);
   }
-  startTime = DateTime.now().microsecondsSinceEpoch;
   await s1.close();
+  print('[Client] Client closed');
   await pool.close();
-  print('client closed');
 }

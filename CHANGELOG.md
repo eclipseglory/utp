@@ -28,3 +28,7 @@
 
 ## 0.3.1
 - Fix UTP packet parse bug
+
+## 0.4.0
+- Implement LEDBAT
+- Change packet sending process to improve sending speed.

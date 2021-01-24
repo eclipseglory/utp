@@ -7,9 +7,15 @@ import 'dart:typed_data';
 
 import 'utp_data.dart';
 
+/// 100 ms = 100000 micro seconds
+const CCONTROL_TARGET = 100000;
+
+/// Each UDP packet should less than 1400 bytes
 const MAX_PACKET_SIZE = 1382;
 
 const MIN_PACKET_SIZE = 150;
+
+const MAX_CWND_INCREASE_PACKETS_PER_RTT = 3000;
 
 ///
 /// UTP socket client.
@@ -179,6 +185,11 @@ class _ServerUTPSocket extends ServerUTPSocket with UTPSocketRecorder {
 
   StreamController<UTPSocket> _sc;
 
+  // TODO test
+  int lastPktTime;
+  // TODO test
+  int totalPktTime = 0;
+
   _ServerUTPSocket(this._socket) {
     assert(_socket != null, 'UDP socket parameter can not be null');
     _sc = StreamController<UTPSocket>();
@@ -192,6 +203,13 @@ class _ServerUTPSocket extends ServerUTPSocket with UTPSocketRecorder {
         UTPPacket data;
         try {
           data = parseData(datagram.data);
+          if (data.type == ST_DATA) {
+            var t = data.sendTime;
+            lastPktTime ??= t;
+            var jiange = t - lastPktTime;
+            lastPktTime = t;
+            totalPktTime += jiange;
+          }
         } catch (e) {
           dev.log('Process receive data error :',
               error: e, name: runtimeType.toString());
@@ -526,6 +544,7 @@ class _UTPSocket extends UTPSocket {
       : super(socket, remoteAddress, remotePort,
             maxWindowSize: maxWindow, encoding: encoding) {
     _allowWindowSize = MIN_PACKET_SIZE; // _packetSize * 2;
+    // _allowWindowSize = maxWindow;
     _packetSize = MIN_PACKET_SIZE;
     _receiveDataStreamController = StreamController<Uint8List>();
   }
@@ -572,21 +591,46 @@ class _UTPSocket extends UTPSocket {
     }
     var window = min(_allowWindowSize, remoteWndSize);
     var allowSize = window - _currentWindowSize;
-    var packetSize = min(allowSize, _packetSize);
-    if (packetSize <= 0) {
+    if (allowSize <= 0) {
       return;
     } else {
-      if (_sendingDataBuffer.length > packetSize) {
-        var d = _sendingDataBuffer.sublist(0, packetSize);
-        _sendingDataBuffer = _sendingDataBuffer.sublist(packetSize);
-        var packet = newDataPacket(d);
-        sendPacket(packet);
+      var sendingBufferSize = _sendingDataBuffer.length;
+      allowSize = min(allowSize, sendingBufferSize);
+      var packetNum = allowSize ~/ _packetSize;
+      var remainSize = allowSize.remainder(_packetSize);
+      var offset = 0;
+
+      if (packetNum == 0 &&
+          _sendingDataCache.isEmpty &&
+          sendingBufferSize <= _packetSize) {
+        var payload = Uint8List(remainSize);
+        List.copyRange(
+            payload, 0, _sendingDataBuffer, offset, offset + remainSize);
+        var packet = newDataPacket(payload);
+        if (sendPacket(packet)) {
+          offset += remainSize;
+        } else {
+          _currentLocalSeq--;
+          _inflightPackets.remove(packet.seq_nr);
+          _currentWindowSize -= packet.length;
+        }
       } else {
-        var packet = newDataPacket(List<int>.from(_sendingDataBuffer));
-        _sendingDataBuffer.clear();
-        sendPacket(packet);
+        for (var i = 0; i < packetNum; i++, offset += _packetSize) {
+          var payload = Uint8List(_packetSize);
+          List.copyRange(
+              payload, 0, _sendingDataBuffer, offset, offset + _packetSize);
+          var packet = newDataPacket(payload);
+          if (!sendPacket(packet)) {
+            _currentLocalSeq--;
+            _inflightPackets.remove(packet.seq_nr);
+            _currentWindowSize -= packet.length;
+            break;
+          }
+        }
       }
+      if (offset != 0) _sendingDataBuffer = _sendingDataBuffer.sublist(offset);
       Timer.run(() => _requestSendData());
+      // _requestSendData();
     }
   }
 
@@ -895,6 +939,7 @@ class _UTPSocket extends UTPSocket {
     _resendTimer[seq] = Timer(Duration.zero, () {
       // print('重新发送 $seq');
       _currentWindowSize -= packet.length;
+      packet.resend++;
       _resendTimer.remove(seq);
       sendPacket(packet, times, false, false);
     });
@@ -902,9 +947,10 @@ class _UTPSocket extends UTPSocket {
 
   /// 更新超时时间
   ///
-  /// 该计算公式请查阅BEP00029规范
+  /// 该计算公式请查阅BEP00029规范以及[RFC6298](https://tools.ietf.org/html/rfc6298)
   void _caculateTimeoutTime(UTPPacket packet) {
     var packetRtt = getNowTimestamp(_startTimeOffset) - packet.sendTime;
+    // _caculateRTO(packetRtt.toDouble());
     var packetRttD = packetRtt / 1000;
     var delta = (_rtt - packetRttD).abs();
     _rtt_var += (delta - _rtt_var) / 4;
@@ -912,31 +958,99 @@ class _UTPSocket extends UTPSocket {
     var td = max(_rtt + _rtt_var * 4, 500.0);
     _timeoutCounterTime = td.floor(); //(_rtt + _rtt_var * 4, 500);
 
-    var len = packet.length;
-    if (len != 0 && packetRtt != 0) {
-      var speed = MIN_PACKET_SIZE / packetRttD;
-      var maybe = speed * td;
-      var mf = maybe.floor();
-      _allowWindowSize = mf;
-      _allowWindowSize = min(_allowWindowSize, maxWindowSize);
-      _packetSize = mf;
-      _packetSize = min(_packetSize, MAX_PACKET_SIZE);
-    }
+    // var len = packet.length;
+    // if (len != 0 && packetRtt != 0) {
+    //   var speed = MIN_PACKET_SIZE / packetRttD;
+    //   var maybe = speed * td;
+    //   var mf = maybe.floor();
+    //   _allowWindowSize = mf;
+    //   _allowWindowSize = min(_allowWindowSize, maxWindowSize);
+    //   _packetSize = mf;
+    //   _packetSize = min(_packetSize, MAX_PACKET_SIZE);
+    //   print('current window : $_allowWindowSize ,  packet :$_packetSize');
+    // }
   }
 
-  /// 确认收到某个Packet
+  /// 确认收到某个[seq]对应的Packet,[pktDelay]是该Packet的发送到确认延迟时间
   ///
-  /// 如果该Packet已经被acked，返回false，否则返回true
-  bool _ackPacket(int seq) {
+  /// 如果该Packet已经被acked，返回-1，否则返回packet的payload大小
+  int _ackPacket(int seq) {
     var packet = _inflightPackets.remove(seq);
     var resend = _resendTimer.remove(seq);
     resend?.cancel();
     if (packet != null) {
       _caculateTimeoutTime(packet);
-      _currentWindowSize -= packet.length;
-      return true;
+      var ackedSize = packet.length;
+      _currentWindowSize -= ackedSize;
+      var now = getNowTimestamp(_startTimeOffset);
+      var rtt = now - packet.sendTime;
+      // 重发的packet不算
+      if (rtt != 0 && packet.resend == 0) {
+        minPacketRTT ??= rtt;
+        minPacketRTT = min(minPacketRTT, rtt);
+      }
+      return ackedSize;
     }
-    return false;
+    return -1;
+  }
+
+  int minPacketRTT;
+
+  int get currentDelay {
+    if (_receiveTimeDiffHistory.isEmpty) return 0;
+    var sum = 0;
+    var now = DateTime.now().millisecondsSinceEpoch;
+    for (var i = 0; i < _receiveTimeDiffHistory.length;) {
+      var his = _receiveTimeDiffHistory[i];
+      if (now - his[0] >= 5000) {
+        var h = _receiveTimeDiffHistory.removeAt(i);
+        if (h[1] == _baseDiff) _baseDiff = null;
+      } else {
+        var diff = _receiveTimeDiffHistory[i][1];
+        _baseDiff ??= diff;
+        _baseDiff = min(_baseDiff, diff);
+        sum += _receiveTimeDiffHistory[i][1];
+        // print('Diff his[$i] : ${diff} , baseDiff:$_baseDiff');
+        i++;
+        continue;
+      }
+    }
+    if (_receiveTimeDiffHistory.isEmpty) return 0;
+    var avg = sum ~/ _receiveTimeDiffHistory.length;
+    return avg - _baseDiff;
+  }
+
+  final List<List<int>> _receiveTimeDiffHistory = <List<int>>[];
+
+  void addHistoryDiff(int timestampDifference) {
+    if (timestampDifference <= 0) return;
+    var now = DateTime.now().millisecondsSinceEpoch;
+    _receiveTimeDiffHistory.add([now, timestampDifference]);
+  }
+
+  int _baseDiff;
+
+  /// 请查看[RFC6817](https://tools.ietf.org/html/rfc6817)以及BEP0029规范
+  void _ledbatControl(int ackedSize) {
+    if (ackedSize <= 0 || _allowWindowSize == 0) return;
+    var current_delay = currentDelay;
+    if (current_delay == 0) return;
+    var our_delay = min(minPacketRTT, current_delay);
+    if (our_delay == 0) return;
+    // print(
+    //     'rtt : $minPacketRTT ,our delay : $queuing_delay , current delay: $current_delay');
+    var off_target = (CCONTROL_TARGET - our_delay) / CCONTROL_TARGET;
+    //  The window size in the socket structure specifies the number of bytes we may have in flight (not acked) in total,
+    //  on the connection. The send rate is directly correlated to this window size. The more bytes in flight, the faster
+    //   send rate. In the code, the window size is called max_window. Its size is controlled, roughly, by the following expression:
+    var delay_factor = off_target;
+    var window_factor = ackedSize / _allowWindowSize;
+    var scaled_gain =
+        MAX_CWND_INCREASE_PACKETS_PER_RTT * delay_factor * window_factor;
+    // Where the first factor scales the off_target to units of target delays.
+    // The scaled_gain is then added to the max_window:
+    _allowWindowSize += scaled_gain.toInt();
+    _packetSize = MAX_PACKET_SIZE;
   }
 
   ///
@@ -968,8 +1082,11 @@ class _UTPSocket extends UTPSocket {
     if (selectiveAck != null && selectiveAck.isNotEmpty) {
       acked.addAll(selectiveAck);
     }
+    var ackedSize = 0;
     for (var i = 0; i < acked.length; i++) {
-      newSeqAcked = _ackPacket(acked[i]) || newSeqAcked;
+      var size = _ackPacket(acked[i]);
+      newSeqAcked = (size >= 0) || newSeqAcked;
+      ackedSize += size;
     }
 
     var hasLost = false;
@@ -988,7 +1105,7 @@ class _UTPSocket extends UTPSocket {
             var over = acked.length - i - 1;
             var limit = ((currentLocalSeq - 1 - key) & MAX_UINT16);
             limit = min(3, limit);
-            if (over >= limit) {
+            if (over > limit) {
               var nextIndex = i + 1;
               var preIndex = i - 1;
               if (nextIndex < acked.length) {
@@ -1025,13 +1142,16 @@ class _UTPSocket extends UTPSocket {
     for (var i = 0; i < keys.length; i++) {
       var key = keys[i];
       if (compareSeqLess(ackSeq, key)) break;
-      newSeqAcked = _ackPacket(key) || newSeqAcked;
+      var size = _ackPacket(key);
+      ackedSize += size;
+      newSeqAcked = (size >= 0) || newSeqAcked;
     }
+
+    if (newSeqAcked) _ledbatControl(ackedSize);
     if (hasLost) {
       dev.log('Lose packets, half cut window size and packet size',
           name: runtimeType.toString());
       _allowWindowSize = _allowWindowSize ~/ 2;
-      if (_packetSize > _allowWindowSize) _packetSize = _allowWindowSize;
     }
 
     if (_inflightPackets.isEmpty && _duplicateAckCountMap.isNotEmpty) {
@@ -1054,8 +1174,8 @@ class _UTPSocket extends UTPSocket {
       closeForce();
       return;
     }
-    Timer.run(() => _requestSendData());
     startKeepAlive();
+    Timer.run(() => _requestSendData());
   }
 
   /// 启动一个超时定时器
@@ -1103,7 +1223,7 @@ class _UTPSocket extends UTPSocket {
         ST_STATE, sendId, 0, 0, maxWindowSize, currentLocalSeq, lastRemoteSeq);
   }
 
-  UTPPacket newDataPacket(List<int> payload) {
+  UTPPacket newDataPacket(Uint8List payload) {
     return UTPPacket(
         ST_DATA, sendId, 0, 0, maxWindowSize, currentLocalSeq, lastRemoteSeq,
         payload: payload);
@@ -1111,7 +1231,12 @@ class _UTPSocket extends UTPSocket {
 
   SelectiveACK newSelectiveACK() {
     if (_receivePacketBuffer.isEmpty) return null;
-    var len = _receivePacketBuffer.length;
+    _receivePacketBuffer.sort((a, b) {
+      if (a > b) return 1;
+      if (a < b) return -1;
+      return 0;
+    });
+    var len = _receivePacketBuffer.last.seq_nr - lastRemoteSeq;
     var c = len ~/ 32;
     var r = len.remainder(32);
     if (r != 0) c++;
@@ -1146,7 +1271,11 @@ class _UTPSocket extends UTPSocket {
     timer?.cancel();
     _requestSendAckMap[ack] = Timer(Duration.zero, () {
       _requestSendAckMap.remove(ack);
-      sendPacket(packet);
+      if (!sendPacket(packet, 0, false, false) &&
+          packet.ack_nr == _finalRemoteFINSeq) {
+        // 发送失败除非是最后的FIN，否则没必要持续重发
+        Timer.run(() => requestSendAck());
+      }
     });
   }
 
@@ -1196,15 +1325,13 @@ class _UTPSocket extends UTPSocket {
           if (a < b) return -1;
           return 0;
         });
-        for (var i = 0; i < _receivePacketBuffer.length;) {
-          var nextPacket = _receivePacketBuffer[i];
-          if (nextPacket.seq_nr == ((lastRemoteSeq + 1) & MAX_UINT16)) {
-            lastRemoteSeq = nextPacket.seq_nr;
-            _throwDataToListener(nextPacket);
-            _receivePacketBuffer.removeAt(i);
-            continue;
-          }
-          break;
+        var nextPacket = _receivePacketBuffer.first;
+        while (nextPacket.seq_nr == ((lastRemoteSeq + 1) & MAX_UINT16)) {
+          lastRemoteSeq = nextPacket.seq_nr;
+          _throwDataToListener(nextPacket);
+          _receivePacketBuffer.removeAt(0);
+          if (_receivePacketBuffer.isEmpty) break;
+          nextPacket = _receivePacketBuffer.first;
         }
       }
     }
@@ -1212,8 +1339,11 @@ class _UTPSocket extends UTPSocket {
       if (lastRemoteSeq == _finalRemoteFINSeq) {
         // 如果是最后一个数据包，那就关闭该socket
         var packet = newAckPacket();
-        sendPacket(packet, 0, false, false);
-        sendPacket(packet, 0, false, false);
+        var s = sendPacket(packet, 0, false, false);
+        // 如果没发出去，疯狂重发
+        while (!s) {
+          s = sendPacket(packet, 0, false, false);
+        }
         _FINTimer?.cancel();
         closeForce();
         return;
@@ -1237,15 +1367,15 @@ class _UTPSocket extends UTPSocket {
   /// [increase]表示是否自增seq , 如果type是ST_STATE，则该值无论真假，都不会增加seq
   ///
   /// [save]表示是否保存到in-flighting packets map中，如果type是ST_STATE，则该值无论真假，都不会保存
-  void sendPacket(UTPPacket packet,
+  bool sendPacket(UTPPacket packet,
       [int times = 0, bool increase = true, bool save = true]) {
-    if (isClosed || _socket == null) return;
+    if (isClosed || _socket == null) return false;
     var len = packet.length;
     _currentWindowSize += len;
     // 按照包被创建时间来计算
     _startTimeOffset ??= DateTime.now().microsecondsSinceEpoch;
     var time = getNowTimestamp(_startTimeOffset);
-    var diff = (time - lastRemotePktTimestamp) & MAX_UINT32;
+    var diff = (time - lastRemotePktTimestamp).abs() & MAX_UINT32;
     if (packet.type == ST_SYN) {
       diff = 0;
     }
@@ -1272,12 +1402,16 @@ class _UTPSocket extends UTPSocket {
       }
     }
     var bytes = packet.getBytes(ack: lastAck, time: time, timeDiff: diff);
-    dev.log(
-        'Send(${_Type2Map[packet.type]}) : seq : ${packet.seq_nr} , ack : ${packet.ack_nr}',
-        name: runtimeType.toString());
-    _socket?.send(bytes, remoteAddress, remotePort);
+    var sendBytes = _socket?.send(bytes, remoteAddress, remotePort);
+    var success = sendBytes > 0;
+    if (success) {
+      dev.log(
+          'Send(${_Type2Map[packet.type]}) : seq : ${packet.seq_nr} , ack : ${packet.ack_nr},length:${packet.length}',
+          name: runtimeType.toString());
+    }
     // 每次发送都会更新一次keepalive
-    if (isConnected) startKeepAlive();
+    if (isConnected && success) startKeepAlive();
+    return success;
   }
 
   /// 发送FIN消息给对方。
@@ -1287,8 +1421,11 @@ class _UTPSocket extends UTPSocket {
     if (isClosed || _finSended) return;
     var packet =
         UTPPacket(ST_FIN, sendId, 0, 0, 0, currentLocalSeq, lastRemoteSeq);
-    sendPacket(packet, 0, false, true);
-    _finSended = true;
+    _finSended = sendPacket(packet, 0, false, true);
+    if (!_finSended) {
+      _inflightPackets.remove(packet.seq_nr);
+      Timer.run(() => _requestSendData());
+    }
     return;
   }
 
@@ -1379,7 +1516,6 @@ void _processReceiveData(
   dev.log(
       'Receive(${_Type2Map[packetData.type]}) : seq : ${packetData.seq_nr} , ack : ${packetData.ack_nr}',
       name: 'utp_protocol_impelement');
-
   switch (packetData.type) {
     case ST_SYN:
       _processSYNMessage(
@@ -1412,6 +1548,9 @@ void _processResetMessage(_UTPSocket socket) {
 void _processFINMessage(_UTPSocket socket, UTPPacket packetData) async {
   if (socket == null || socket.isClosed || socket.isClosing) return;
   socket._remoteFIN(packetData.seq_nr);
+  socket.lastRemotePktTimestamp = packetData.sendTime;
+  socket.remoteWndSize = packetData.wnd_size;
+  socket.addHistoryDiff(packetData.timestampDifference);
   socket.addReceivePacket(packetData);
   socket.remoteAcked(packetData.ack_nr);
 }
@@ -1490,8 +1629,10 @@ void _processDataMessage(_UTPSocket socket, UTPPacket packetData,
   if (socket.isConnected || socket.isClosing) {
     socket.remoteWndSize = packetData.wnd_size; // 更新对方的window size
     socket.lastRemotePktTimestamp = packetData.sendTime;
+    socket.addHistoryDiff(packetData.timestampDifference);
     socket.addReceivePacket(packetData);
     socket.remoteAcked(packetData.ack_nr, selectiveAcks);
+
     return;
   }
 }
@@ -1516,6 +1657,7 @@ void _processStateMessage(_UTPSocket socket, UTPPacket packetData,
   if (socket.isConnected || socket.isClosing) {
     socket.remoteWndSize = packetData.wnd_size; // 更新对方的window size
     socket.lastRemotePktTimestamp = packetData.sendTime;
+    socket.addHistoryDiff(packetData.timestampDifference);
     socket.remoteAcked(packetData.ack_nr, selectiveAcks, true);
   }
 }

@@ -1,10 +1,10 @@
 import 'dart:io';
 import 'dart:typed_data';
 
-import 'package:utp/src/utp_protocol_implement.dart';
+import 'package:utp/utp.dart';
 
 void main(List<String> args) async {
-  var server = await ServerUTPSocket.bind(InternetAddress.anyIPv4, 65444);
+  var server = await ServerUTPSocket.bind(InternetAddress.anyIPv4, 0);
   var port = server.port;
   server.listen((socket) {
     socket.listen((datas) {
