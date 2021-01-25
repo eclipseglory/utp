@@ -6,10 +6,9 @@ import 'package:utp/src/utp_protocol_implement.dart';
 void main() async {
   var total = 21889;
   var chinese = '中文字符甲乙丙丁戊己庚辛\n';
-  var port = 64476;
   int startTime;
   var ss = await ServerUTPSocket.bind(InternetAddress.anyIPv4, 0);
-  port = ss.port;
+  var port = ss.port;
   print('[Server] start to listening at $port');
   var receive = <int>[];
   ss.listen((socket) {

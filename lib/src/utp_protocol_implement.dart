@@ -7,6 +7,8 @@ import 'dart:typed_data';
 
 import 'utp_data.dart';
 
+const MAX_TIMEOUT = 2;
+
 /// 100 ms = 100000 micro seconds
 const CCONTROL_TARGET = 100000;
 
@@ -24,7 +26,7 @@ const MAX_CWND_INCREASE_PACKETS_PER_RTT = 3000;
 /// can create multiple UTPSocket.
 ///
 /// See also [ServerUTPSocket]
-class UTPSocketClient extends _UTPCloseHandler with UTPSocketRecorder {
+class UTPSocketClient extends _UTPCloseHandler with _UTPSocketRecorder {
   bool _closed = false;
 
   /// 是否已被销毁
@@ -67,7 +69,7 @@ class UTPSocketClient extends _UTPCloseHandler with UTPSocketRecorder {
     var completer = Completer<UTPSocket>();
     _connectingSocketMap[connId] = completer;
 
-    utp.connectionState = UTPConnectState.SYN_SENT; //修改socket连接状态
+    utp.connectionState = _UTPConnectState.SYN_SENT; //修改socket连接状态
     // 初始化send_id 和_receive_id
     utp.receiveId = connId; //初始一个随机的connection id
     utp.sendId = (utp.receiveId + 1) & MAX_UINT16;
@@ -75,6 +77,7 @@ class UTPSocketClient extends _UTPCloseHandler with UTPSocketRecorder {
     utp.currentLocalSeq = Random().nextInt(MAX_UINT16); // 随机一个seq;
     utp.lastRemoteSeq = 0; // 这个设为0，起始是没有得到远程seq的
     utp.lastRemotePktTimestamp = 0;
+    utp.closeHandler = this;
     var packet = UTPPacket(ST_SYN, connId, 0, 0, utp.maxWindowSize,
         utp.currentLocalSeq, utp.lastRemoteSeq);
     utp.sendPacket(packet, 0, true, true);
@@ -149,9 +152,11 @@ class UTPSocketClient extends _UTPCloseHandler with UTPSocketRecorder {
 
   @override
   void socketClosed(_UTPSocket socket) {
-    var s = removeUTPSocket(socket.connectionId);
-    if (s != null) {
-      dev.log('UTPSocket(id:${socket.connectionId}) is closed , remove it');
+    if (socket == null) return;
+    removeUTPSocket(socket.connectionId);
+    var completer = _connectingSocketMap.remove(socket.connectionId);
+    if (completer != null && !completer.isCompleted) {
+      completer.completeError('Connect remote failed');
     }
   }
 }
@@ -176,7 +181,7 @@ abstract class ServerUTPSocket extends _UTPCloseHandler {
   }
 }
 
-class _ServerUTPSocket extends ServerUTPSocket with UTPSocketRecorder {
+class _ServerUTPSocket extends ServerUTPSocket with _UTPSocketRecorder {
   bool _closed = false;
 
   bool get isClosed => _closed;
@@ -184,11 +189,6 @@ class _ServerUTPSocket extends ServerUTPSocket with UTPSocketRecorder {
   RawDatagramSocket _socket;
 
   StreamController<UTPSocket> _sc;
-
-  // TODO test
-  int lastPktTime;
-  // TODO test
-  int totalPktTime = 0;
 
   _ServerUTPSocket(this._socket) {
     assert(_socket != null, 'UDP socket parameter can not be null');
@@ -203,13 +203,6 @@ class _ServerUTPSocket extends ServerUTPSocket with UTPSocketRecorder {
         UTPPacket data;
         try {
           data = parseData(datagram.data);
-          if (data.type == ST_DATA) {
-            var t = data.sendTime;
-            lastPktTime ??= t;
-            var jiange = t - lastPktTime;
-            lastPktTime = t;
-            totalPktTime += jiange;
-          }
         } catch (e) {
           dev.log('Process receive data error :',
               error: e, name: runtimeType.toString());
@@ -270,10 +263,7 @@ class _ServerUTPSocket extends ServerUTPSocket with UTPSocketRecorder {
 
   @override
   void socketClosed(_UTPSocket socket) {
-    var s = removeUTPSocket(socket.connectionId);
-    if (s != null) {
-      dev.log('UTPSocket(id:${socket.connectionId}) is closed , remove it');
-    }
+    removeUTPSocket(socket.connectionId);
   }
 }
 
@@ -284,7 +274,7 @@ class _ServerUTPSocket extends ServerUTPSocket with UTPSocketRecorder {
 /// instance.
 ///
 /// This mixin use two simple `Map` to record the socket instance currentlly
-mixin UTPSocketRecorder {
+mixin _UTPSocketRecorder {
   final Map<int, _UTPSocket> indexMap = {};
 
   /// Get the `UTPSocket` via [connectionId]
@@ -385,7 +375,7 @@ abstract class UTPSocket extends Socket {
   @override
   bool setOption(SocketOption option, bool enabled) {
     // TODO: implement setOption
-    throw UnimplementedError();
+    return false;
   }
 
   /// Useless method
@@ -400,12 +390,12 @@ abstract class UTPSocket extends Socket {
   @override
   Uint8List getRawOption(RawSocketOption option) {
     // TODO: implement getRawOption
-    throw UnimplementedError();
+    return null;
   }
 }
 
 /// UTP socket connection state.
-enum UTPConnectState {
+enum _UTPConnectState {
   /// UTP socket send then SYN message to another for connecting
   SYN_SENT,
 
@@ -430,22 +420,29 @@ abstract class _UTPCloseHandler {
 
 class _UTPSocket extends UTPSocket {
   @override
-  bool get isConnected => connectionState == UTPConnectState.CONNECTED;
+  bool get isConnected => connectionState == _UTPConnectState.CONNECTED;
 
   @override
   int get connectionId => receiveId;
 
-  UTPConnectState connectionState;
+  _UTPConnectState connectionState;
 
-  int _timeoutCounterTime = 1000;
+  // int _timeoutCounterTime = 1000;
 
   int _packetSize = MIN_PACKET_SIZE;
 
   final int maxInflightPackets = 2;
 
-  double _rtt = 0.0;
+  double _srtt;
 
-  double _rtt_var = 800.0;
+  double _rttvar;
+
+  /// 超时时间，单位微妙
+  double _rto = 1000000.0;
+
+  // double _rtt = 0.0;
+
+  // double _rtt_var = 800.0;
 
   int sendId;
 
@@ -495,9 +492,13 @@ class _UTPSocket extends UTPSocket {
 
   int _currentWindowSize = 0;
 
-  Timer _outTimer;
+  Timer _rtoTimer;
 
   bool _closed = false;
+
+  int minPacketRTT;
+
+  final List<List<int>> _baseDelays = <List<int>>[];
 
   /// 发送FIN消息并关闭socket的一个future控制completer
   Completer _closeCompleter;
@@ -506,7 +507,7 @@ class _UTPSocket extends UTPSocket {
   bool get isClosed => _closed;
 
   /// 正在关闭
-  bool get isClosing => connectionState == UTPConnectState.CLOSING;
+  bool get isClosing => connectionState == _UTPConnectState.CLOSING;
 
   StreamController<Uint8List> _receiveDataStreamController;
 
@@ -760,9 +761,12 @@ class _UTPSocket extends UTPSocket {
 
   /// Send ST_RESET message to remote and close this socket force.
   @override
-  void destroy() {
-    _sendResetMessage(connectionId, _socket, remoteAddress, remotePort);
+  Future destroy() async {
+    connectionState = _UTPConnectState.CLOSING;
+    await _sendResetMessage(sendId, _socket, remoteAddress, remotePort);
+    _closeCompleter ??= Completer();
     closeForce();
+    return _closeCompleter.future;
   }
 
   @override
@@ -778,10 +782,11 @@ class _UTPSocket extends UTPSocket {
         ?.firstWhere(test, orElse: orElse);
   }
 
+  @Deprecated('Useless')
   @override
   Future flush() {
     // TODO: implement flush
-    throw UnimplementedError();
+    return null;
   }
 
   @override
@@ -919,7 +924,7 @@ class _UTPSocket extends UTPSocket {
   @override
   Future close([dynamic reason]) {
     if (isClosed) return null;
-    connectionState = UTPConnectState.CLOSING;
+    connectionState = _UTPConnectState.CLOSING;
     _closeCompleter = Completer();
     Timer(Duration.zero, () => _requestSendData(null));
     // Timer.run(() => _requestSendData(null));
@@ -947,39 +952,29 @@ class _UTPSocket extends UTPSocket {
 
   /// 更新超时时间
   ///
-  /// 该计算公式请查阅BEP00029规范以及[RFC6298](https://tools.ietf.org/html/rfc6298)
-  void _caculateTimeoutTime(UTPPacket packet) {
+  /// 该计算公式请查阅BEP0029规范以及[RFC6298](https://tools.ietf.org/html/rfc6298)
+  void _caculateRTO(UTPPacket packet) {
     var packetRtt = getNowTimestamp(_startTimeOffset) - packet.sendTime;
-    // _caculateRTO(packetRtt.toDouble());
-    var packetRttD = packetRtt / 1000;
-    var delta = (_rtt - packetRttD).abs();
-    _rtt_var += (delta - _rtt_var) / 4;
-    _rtt += (packetRttD - _rtt) / 8;
-    var td = max(_rtt + _rtt_var * 4, 500.0);
-    _timeoutCounterTime = td.floor(); //(_rtt + _rtt_var * 4, 500);
-
-    // var len = packet.length;
-    // if (len != 0 && packetRtt != 0) {
-    //   var speed = MIN_PACKET_SIZE / packetRttD;
-    //   var maybe = speed * td;
-    //   var mf = maybe.floor();
-    //   _allowWindowSize = mf;
-    //   _allowWindowSize = min(_allowWindowSize, maxWindowSize);
-    //   _packetSize = mf;
-    //   _packetSize = min(_packetSize, MAX_PACKET_SIZE);
-    //   print('current window : $_allowWindowSize ,  packet :$_packetSize');
-    // }
+    if (_srtt == null) {
+      _srtt = packetRtt.toDouble();
+      _rttvar = packetRtt / 2;
+    } else {
+      _rttvar = (1 - 0.25) * _rttvar + 0.25 * (_srtt - packetRtt).abs();
+      _srtt = (1 - 0.125) * _srtt + 0.125 * packetRtt;
+    }
+    _rto = _srtt + max(100000, 4 * _rttvar);
+    // RFC6298规范中，如果RTO不到1秒，则设置为1秒，这里是给出的0.5秒
+    _rto = max(_rto, 500000);
   }
 
-  /// 确认收到某个[seq]对应的Packet,[pktDelay]是该Packet的发送到确认延迟时间
+  /// ACK某个[seq]对应的packet.
   ///
-  /// 如果该Packet已经被acked，返回-1，否则返回packet的payload大小
-  int _ackPacket(int seq) {
+  /// 如果该Packet已经被acked，返回null，否则返回packet
+  UTPPacket _ackPacket(int seq) {
     var packet = _inflightPackets.remove(seq);
     var resend = _resendTimer.remove(seq);
     resend?.cancel();
     if (packet != null) {
-      _caculateTimeoutTime(packet);
       var ackedSize = packet.length;
       _currentWindowSize -= ackedSize;
       var now = getNowTimestamp(_startTimeOffset);
@@ -989,61 +984,77 @@ class _UTPSocket extends UTPSocket {
         minPacketRTT ??= rtt;
         minPacketRTT = min(minPacketRTT, rtt);
       }
-      return ackedSize;
+      return packet;
     }
-    return -1;
+    return null;
   }
 
-  int minPacketRTT;
-
-  int get currentDelay {
-    if (_receiveTimeDiffHistory.isEmpty) return 0;
-    var sum = 0;
+  /// 更新base delay
+  ///
+  /// 只保存5秒内的delay
+  void _updateBaseDelay(int delay) {
+    if (delay <= 0) return;
     var now = DateTime.now().millisecondsSinceEpoch;
-    for (var i = 0; i < _receiveTimeDiffHistory.length;) {
-      var his = _receiveTimeDiffHistory[i];
-      if (now - his[0] >= 5000) {
-        var h = _receiveTimeDiffHistory.removeAt(i);
-        if (h[1] == _baseDiff) _baseDiff = null;
-      } else {
-        var diff = _receiveTimeDiffHistory[i][1];
-        _baseDiff ??= diff;
-        _baseDiff = min(_baseDiff, diff);
-        sum += _receiveTimeDiffHistory[i][1];
-        // print('Diff his[$i] : ${diff} , baseDiff:$_baseDiff');
-        i++;
-        continue;
-      }
+    _baseDelays.add([now, delay]);
+    var first = _baseDelays.first;
+    while (now - first[0] > 5000) {
+      _baseDelays.removeAt(0);
+      if (_baseDelays.isEmpty) break;
+      first = _baseDelays.first;
     }
-    if (_receiveTimeDiffHistory.isEmpty) return 0;
-    var avg = sum ~/ _receiveTimeDiffHistory.length;
+  }
+
+  /// 获得当前Delay
+  ///
+  /// 计算规则：当前basedelay的平均值减去当前basedelay中的最小值
+  int get currentDelay {
+    if (_baseDelays.isEmpty) return 0;
+    var sum = 0;
+    int _baseDiff;
+    for (var i = 0; i < _baseDelays.length; i++) {
+      var diff = _baseDelays[i][1];
+      _baseDiff ??= diff;
+      _baseDiff = min(_baseDiff, diff);
+      sum += _baseDelays[i][1];
+    }
+    var avg = sum ~/ _baseDelays.length;
     return avg - _baseDiff;
   }
 
-  final List<List<int>> _receiveTimeDiffHistory = <List<int>>[];
-
-  void addHistoryDiff(int timestampDifference) {
-    if (timestampDifference <= 0) return;
-    var now = DateTime.now().millisecondsSinceEpoch;
-    _receiveTimeDiffHistory.add([now, timestampDifference]);
-  }
-
-  int _baseDiff;
-
   /// 请查看[RFC6817](https://tools.ietf.org/html/rfc6817)以及BEP0029规范
-  void _ledbatControl(int ackedSize) {
+  void _ledbatControl(int ackedSize, int delay) {
     if (ackedSize <= 0 || _allowWindowSize == 0) return;
+    // int minBaseDelay;
+    // _baseDelays.forEach((element) {
+    //   minBaseDelay ??= element[1];
+    //   minBaseDelay = min(minBaseDelay, element[1]);
+    // });
+    // if (minBaseDelay == null) return;
+    // 这是原规范中提到的算法，和下面的算法是一致的。
+    // 不同的是，1.UTP允许cwnd为0，这样就发不出数据，然后会在超时的时候将cwnd设为最小窗口
+    // 2. currnetDelay不同，规范中提出，currentDelay可以利用很多种方法过滤获得，不过滤也
+    // 是其中一种过滤。我在实现的时候采用的是利用5秒中内的delay的平均值,以及最小packet rtt两者
+    // 的最小值，这是参考了libutp的代码，但具体对不对我也不知道。
+    // var queuing_delay = delay - minBaseDelay;
+    // var off_target = (CCONTROL_TARGET - queuing_delay) / CCONTROL_TARGET;
+    // cwnd += MAX_CWND_INCREASE_PACKETS_PER_RTT * off_target * ackedSize ~/ cwnd;
+    // var max_allowed_cwnd = _currentWindowSize + ackedSize + 3000;
+    // cwnd = min(cwnd, max_allowed_cwnd);
+    // cwnd = max(cwnd, 150);
+
     var current_delay = currentDelay;
     if (current_delay == 0) return;
-    var our_delay = min(minPacketRTT, current_delay);
+    var our_delay =
+        min(minPacketRTT, current_delay); // delay会影响增加窗口的大小，这种获得的delay增加窗口会很激进
+    // var our_delay = current_delay; // 这种方法会温和一些
     if (our_delay == 0) return;
     // print(
     //     'rtt : $minPacketRTT ,our delay : $queuing_delay , current delay: $current_delay');
-    var off_target = (CCONTROL_TARGET - our_delay) / CCONTROL_TARGET;
+    var off_target1 = (CCONTROL_TARGET - our_delay) / CCONTROL_TARGET;
     //  The window size in the socket structure specifies the number of bytes we may have in flight (not acked) in total,
     //  on the connection. The send rate is directly correlated to this window size. The more bytes in flight, the faster
     //   send rate. In the code, the window size is called max_window. Its size is controlled, roughly, by the following expression:
-    var delay_factor = off_target;
+    var delay_factor = off_target1;
     var window_factor = ackedSize / _allowWindowSize;
     var scaled_gain =
         MAX_CWND_INCREASE_PACKETS_PER_RTT * delay_factor * window_factor;
@@ -1062,7 +1073,7 @@ class _UTPSocket extends UTPSocket {
   ///
   /// 对于有效[ackSeq]，会查看发送队列中的数据包，并清除所有小于等于该[ackSeq]的数据包(因为对方已经表示确认收到了)。
   ///
-  /// 重复收到[ackSeq]，或者[selectiveAck]中的序列号重复收到，当[count]值为`true`的时候会进行计数(仅对STATE类型的ack_nr进行计数)，
+  /// 重复收到[ackSeq]，或者[selectiveAck]中的序列号重复收到，当[isAckType]值为`true`的时候会进行计数(仅对STATE类型的ack_nr进行计数)，
   /// 当某seq重复次数超过3次：
   ///
   /// - 如果该序列号往前的包已经有超过3个被确认收到(*如果该序列号是最后几个发送的，那它的前几个可能不会有3个，则会降低该阈值*)，
@@ -1071,27 +1082,37 @@ class _UTPSocket extends UTPSocket {
   ///
   /// 然后该计数会重置， 丢包的数据会立即重发。
   ///
-  void remoteAcked(int ackSeq, [List<int> selectiveAck, bool count = false]) {
+  void remoteAcked(int ackSeq, int currentDelay,
+      [bool isAckType = true, List<int> selectiveAck]) {
     if (isClosed) return;
     if (!isConnected && !isClosing) return;
     if (ackSeq > currentLocalSeq || _inflightPackets.isEmpty) return;
-    var newSeqAcked = false;
+
     var acked = <int>[];
     lastRemoteAck = ackSeq;
+    var ackedSize = 0;
+
+    var thisAckPacket = _ackPacket(ackSeq);
+    var newSeqAcked = thisAckPacket != null;
+    if (thisAckPacket != null) ackedSize += thisAckPacket.length;
+    if (thisAckPacket != null && isAckType) {
+      _updateBaseDelay(currentDelay);
+      _caculateRTO(thisAckPacket);
+    }
     acked.add(ackSeq);
     if (selectiveAck != null && selectiveAck.isNotEmpty) {
       acked.addAll(selectiveAck);
     }
-    var ackedSize = 0;
-    for (var i = 0; i < acked.length; i++) {
-      var size = _ackPacket(acked[i]);
-      newSeqAcked = (size >= 0) || newSeqAcked;
-      ackedSize += size;
+
+    for (var i = 1; i < acked.length; i++) {
+      var ackedPacket = _ackPacket(acked[i]);
+      newSeqAcked = (ackedPacket != null) || newSeqAcked;
+      if (ackedPacket != null) ackedSize += ackedPacket.length;
     }
 
     var hasLost = false;
 
-    if (count) {
+    if (isAckType) {
       var lostPackets = <int>{};
       for (var i = 0; i < acked.length; i++) {
         var key = acked[i];
@@ -1142,12 +1163,12 @@ class _UTPSocket extends UTPSocket {
     for (var i = 0; i < keys.length; i++) {
       var key = keys[i];
       if (compareSeqLess(ackSeq, key)) break;
-      var size = _ackPacket(key);
-      ackedSize += size;
-      newSeqAcked = (size >= 0) || newSeqAcked;
+      var ackedPacket = _ackPacket(key);
+      if (ackedPacket != null) ackedSize += ackedPacket.length;
+      newSeqAcked = (ackedPacket != null) || newSeqAcked;
     }
 
-    if (newSeqAcked) _ledbatControl(ackedSize);
+    if (newSeqAcked && isAckType) _ledbatControl(ackedSize, currentDelay);
     if (hasLost) {
       dev.log('Lose packets, half cut window size and packet size',
           name: runtimeType.toString());
@@ -1167,13 +1188,13 @@ class _UTPSocket extends UTPSocket {
         _duplicateAckCountMap.remove(element);
       });
     }
-    if (newSeqAcked) _startTimeoutCounter();
     if (_finSended && _inflightPackets.isEmpty) {
       // 如果已经发送FIN并且发送队列中的所有packet已经被ack
       // 则认为对方已经全部收到，关闭该socket
       closeForce();
       return;
     }
+    _startTimeoutCounter();
     startKeepAlive();
     Timer.run(() => _requestSendData());
   }
@@ -1187,20 +1208,27 @@ class _UTPSocket extends UTPSocket {
   ///
   /// 每次超时，socket会重新发送队列中的packet。当超时次数超过5次时，则认为对方挂了，socket会自行断开
   void _startTimeoutCounter([int times = 0]) async {
-    _outTimer?.cancel();
+    _rtoTimer?.cancel();
     if (_inflightPackets.isEmpty) return;
-    _outTimer = Timer(Duration(milliseconds: _timeoutCounterTime), () async {
-      _outTimer?.cancel();
+    if (connectionState == _UTPConnectState.SYN_SENT) {
+      // 这里请查阅RFC6298第5节 5.7
+      if (_rto < 3000000) _rto = 3000000;
+    }
+    _rtoTimer = Timer(Duration(microseconds: _rto.floor()), () async {
+      _rtoTimer?.cancel();
       if (_inflightPackets.isEmpty) return;
-      if (times >= 5) {
+      if (times + 1 >= MAX_TIMEOUT) {
         dev.log('Socket closed :',
-            error: 'Send data timeout', name: runtimeType.toString());
+            error: 'Send data timeout (${times + 1}/$MAX_TIMEOUT)',
+            name: runtimeType.toString());
         addError('Send data timeout');
-        await closeForce();
+        _closeCompleter ??= Completer();
+        closeForce();
+        await _closeCompleter.future;
         return;
       }
       dev.log(
-          'Send data timeout , reset window/packet to min size($MIN_PACKET_SIZE)',
+          'Send data/SYN timeout (${times + 1}/$MAX_TIMEOUT) , reset window/packet to min size($MIN_PACKET_SIZE bytes)',
           name: runtimeType.toString());
       _allowWindowSize = MIN_PACKET_SIZE;
       _packetSize = MIN_PACKET_SIZE;
@@ -1209,12 +1237,11 @@ class _UTPSocket extends UTPSocket {
       var now = getNowTimestamp(_startTimeOffset);
       _inflightPackets.values.forEach((packet) {
         var passed = now - packet.sendTime;
-        passed = passed ~/ 1000; // 这是微秒，换成毫秒
-        if (passed >= _timeoutCounterTime) {
+        if (passed >= _rto) {
           _resendPacket(packet.seq_nr, times);
         }
       });
-      _timeoutCounterTime *= 2; // 超时时间翻倍
+      _rto *= 2; // 超时时间翻倍
     });
   }
 
@@ -1391,7 +1418,6 @@ class _UTPSocket extends UTPSocket {
         packet.type == ST_SYN ||
         packet.type == ST_FIN) {
       lastAck = lastRemoteSeq; // DATA类型发送的时候携带最新的ack
-      _startTimeoutCounter(times);
     }
     if (packet.type == ST_DATA || packet.type == ST_STATE) {
       // 携带最新的selectiveAck
@@ -1408,6 +1434,11 @@ class _UTPSocket extends UTPSocket {
       dev.log(
           'Send(${_Type2Map[packet.type]}) : seq : ${packet.seq_nr} , ack : ${packet.ack_nr},length:${packet.length}',
           name: runtimeType.toString());
+      if (packet.type == ST_DATA ||
+          packet.type == ST_SYN ||
+          packet.type == ST_FIN) {
+        _startTimeoutCounter(times);
+      }
     }
     // 每次发送都会更新一次keepalive
     if (isConnected && success) startKeepAlive();
@@ -1435,8 +1466,8 @@ class _UTPSocket extends UTPSocket {
       closeForce();
       return;
     }
-    _FINTimer = Timer(Duration(milliseconds: _timeoutCounterTime), () {
-      _timeoutCounterTime *= 2;
+    _FINTimer = Timer(Duration(microseconds: _rto.floor()), () {
+      _rto *= 2;
       _startCountDownFINData(++times);
     });
   }
@@ -1445,7 +1476,7 @@ class _UTPSocket extends UTPSocket {
     var expectFinal = (lastRemoteSeq + 1) & MAX_UINT32;
     if (compareSeqLess(expectFinal, finalSeq) || expectFinal == finalSeq) {
       _finalRemoteFINSeq = finalSeq;
-      connectionState = UTPConnectState.CLOSING;
+      connectionState = _UTPConnectState.CLOSING;
     }
   }
 
@@ -1454,17 +1485,17 @@ class _UTPSocket extends UTPSocket {
   /// 不发送FIN给remote，直接关闭socket
   void closeForce() async {
     if (isClosed) return;
-    connectionState = UTPConnectState.CLOSED;
+    connectionState = _UTPConnectState.CLOSED;
     _closed = true;
 
     _FINTimer?.cancel();
     _FINTimer = null;
-    _receivePacketBuffer?.clear();
+    _receivePacketBuffer.clear();
 
     _addDataTimer?.cancel();
     _sendingDataCache.clear();
     _duplicateAckCountMap.clear();
-    _outTimer?.cancel();
+    _rtoTimer?.cancel();
 
     _inflightPackets.clear();
     _resendTimer.forEach((key, timer) {
@@ -1480,6 +1511,8 @@ class _UTPSocket extends UTPSocket {
     _sendingDataBuffer?.clear();
     _keepAliveTimer?.cancel();
 
+    _baseDelays.clear();
+
     // 相当于抛出一个事件
     Timer.run(() {
       _handler?.socketClosed(this);
@@ -1492,6 +1525,7 @@ class _UTPSocket extends UTPSocket {
     _finSended = false;
     await _receiveDataStreamController?.close();
     _receiveDataStreamController = null;
+
     return;
   }
 }
@@ -1540,7 +1574,7 @@ void _processReceiveData(
 ///
 /// Socket接收到此消息后强行关闭连接
 void _processResetMessage(_UTPSocket socket) {
-  socket?.addError('Reset by remote');
+  // socket?.addError('Reset by remote');
   socket?.closeForce();
 }
 
@@ -1550,9 +1584,8 @@ void _processFINMessage(_UTPSocket socket, UTPPacket packetData) async {
   socket._remoteFIN(packetData.seq_nr);
   socket.lastRemotePktTimestamp = packetData.sendTime;
   socket.remoteWndSize = packetData.wnd_size;
-  socket.addHistoryDiff(packetData.timestampDifference);
   socket.addReceivePacket(packetData);
-  socket.remoteAcked(packetData.ack_nr);
+  socket.remoteAcked(packetData.ack_nr, packetData.timestampDifference, false);
 }
 
 /// 处理进来的SYN消息
@@ -1575,7 +1608,7 @@ void _processSYNMessage(_UTPSocket socket, RawDatagramSocket rawSocket,
   socket.receiveId = connId;
   socket.sendId = packetData.connectionId; // 保证发送的conn id一致
   socket.currentLocalSeq = Random().nextInt(MAX_UINT16); // 随机seq
-  socket.connectionState = UTPConnectState.SYN_RECV; // 更改连接状态
+  socket.connectionState = _UTPConnectState.SYN_RECV; // 更改连接状态
   socket.lastRemoteSeq = packetData.seq_nr;
   socket.remoteWndSize = packetData.wnd_size;
   socket.lastRemotePktTimestamp = packetData.sendTime;
@@ -1586,12 +1619,22 @@ void _processSYNMessage(_UTPSocket socket, RawDatagramSocket rawSocket,
 }
 
 /// 通过UDP套接字直接发送一个RESET类型消息给对方
-void _sendResetMessage(int connId, RawDatagramSocket rawSocket,
-    InternetAddress remoteAddress, int remotePort) {
-  var packet = UTPPacket(ST_RESET, connId, 0, 0, 0, 1, 0);
+Future _sendResetMessage(int connId, RawDatagramSocket rawSocket,
+    InternetAddress remoteAddress, int remotePort,
+    [UTPPacket packet, Completer completer]) {
+  if (rawSocket == null) return Future.value();
+  packet ??= UTPPacket(ST_RESET, connId, 0, 0, 0, 1, 0);
   var bytes = packet.getBytes();
-  rawSocket?.send(bytes, remoteAddress, remotePort);
-  return;
+  completer ??= Completer();
+  var s = rawSocket.send(bytes, remoteAddress, remotePort);
+  if (s > 0) {
+    completer.complete();
+    return completer.future;
+  } else {
+    Timer.run(() => _sendResetMessage(
+        connId, rawSocket, remoteAddress, remotePort, packet, completer));
+  }
+  return completer.future;
 }
 
 /// 将packet数据中的SelectiveAck Extension带的ack序列号读出
@@ -1618,9 +1661,9 @@ void _processDataMessage(_UTPSocket socket, UTPPacket packetData,
     return;
   }
   var selectiveAcks = _readSelectiveAcks(packetData);
-  if (socket.connectionState == UTPConnectState.SYN_RECV &&
+  if (socket.connectionState == _UTPConnectState.SYN_RECV &&
       (socket.currentLocalSeq - 1) & MAX_UINT16 == packetData.ack_nr) {
-    socket.connectionState = UTPConnectState.CONNECTED;
+    socket.connectionState = _UTPConnectState.CONNECTED;
     socket.startKeepAlive();
     socket.remoteWndSize = packetData.wnd_size;
     if (onConnected != null) onConnected(socket);
@@ -1629,9 +1672,9 @@ void _processDataMessage(_UTPSocket socket, UTPPacket packetData,
   if (socket.isConnected || socket.isClosing) {
     socket.remoteWndSize = packetData.wnd_size; // 更新对方的window size
     socket.lastRemotePktTimestamp = packetData.sendTime;
-    socket.addHistoryDiff(packetData.timestampDifference);
     socket.addReceivePacket(packetData);
-    socket.remoteAcked(packetData.ack_nr, selectiveAcks);
+    socket.remoteAcked(packetData.ack_nr, packetData.timestampDifference, false,
+        selectiveAcks);
 
     return;
   }
@@ -1645,9 +1688,9 @@ void _processStateMessage(_UTPSocket socket, UTPPacket packetData,
     void Function(_UTPSocket source, dynamic error) onError]) {
   if (socket == null) return;
   var selectiveAcks = _readSelectiveAcks(packetData);
-  if (socket.connectionState == UTPConnectState.SYN_SENT &&
+  if (socket.connectionState == _UTPConnectState.SYN_SENT &&
       (socket.currentLocalSeq - 1) & MAX_UINT16 == packetData.ack_nr) {
-    socket.connectionState = UTPConnectState.CONNECTED;
+    socket.connectionState = _UTPConnectState.CONNECTED;
     socket.lastRemoteSeq = packetData.seq_nr;
     socket.lastRemoteSeq--;
     socket.remoteWndSize = packetData.wnd_size;
@@ -1657,7 +1700,7 @@ void _processStateMessage(_UTPSocket socket, UTPPacket packetData,
   if (socket.isConnected || socket.isClosing) {
     socket.remoteWndSize = packetData.wnd_size; // 更新对方的window size
     socket.lastRemotePktTimestamp = packetData.sendTime;
-    socket.addHistoryDiff(packetData.timestampDifference);
-    socket.remoteAcked(packetData.ack_nr, selectiveAcks, true);
+    socket.remoteAcked(
+        packetData.ack_nr, packetData.timestampDifference, true, selectiveAcks);
   }
 }

@@ -32,3 +32,8 @@
 ## 0.4.0
 - Implement LEDBAT
 - Change packet sending process to improve sending speed.
+
+## 1.0.0
+- Fix destroy method bug
+- Fix close method bug
+- Clear codes
