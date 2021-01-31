@@ -37,3 +37,7 @@
 - Fix destroy method bug
 - Fix close method bug
 - Clear codes
+
+## 1.0.1
+- Fix minrtt null bug
+- Delete log print

@@ -7,7 +7,7 @@ import 'dart:typed_data';
 
 import 'utp_data.dart';
 
-const MAX_TIMEOUT = 2;
+const MAX_TIMEOUT = 5;
 
 /// 100 ms = 100000 micro seconds
 const CCONTROL_TARGET = 100000;
@@ -42,6 +42,10 @@ class UTPSocketClient extends _UTPCloseHandler with _UTPSocketRecorder {
   InternetAddress address;
 
   final Map<int, Completer<UTPSocket>> _connectingSocketMap = {};
+
+  bool get isFull => indexMap.length >= maxSockets;
+
+  bool get isNotFull => !isFull;
 
   /// Connect remote UTP server socket.
   ///
@@ -107,7 +111,9 @@ class UTPSocketClient extends _UTPCloseHandler with _UTPSocketRecorder {
       var connId = data.connectionId;
       var utp = findUTPSocket(connId);
       if (utp == null) {
-        dev.log('Can not find connection $connId');
+        dev.log('UTP error',
+            error: 'Can not find connection $connId',
+            name: runtimeType.toString());
         return;
       }
       var completer = _connectingSocketMap.remove(connId);
@@ -412,8 +418,6 @@ enum _UTPConnectState {
   CLOSING
 }
 
-const _Type2Map = {2: 'ACK', 0: 'Data', 4: 'SYN', 3: 'Reset', 1: 'FIN'};
-
 abstract class _UTPCloseHandler {
   void socketClosed(_UTPSocket socket);
 }
@@ -568,7 +572,7 @@ class _UTPSocket extends UTPSocket {
     _keepAliveTimer = Timer(Duration(seconds: 30), () {
       var ack = 0;
       if (_lastRemoteSeq != null) ack = (_lastRemoteSeq - 1) & MAX_UINT16;
-      dev.log('Send keepalive message', name: runtimeType.toString());
+      // dev.log('Send keepalive message', name: runtimeType.toString());
       var packet = UTPPacket(
           ST_STATE, sendId, 0, 0, maxWindowSize, currentLocalSeq, ack);
       sendPacket(packet, 0, false, false);
@@ -1043,7 +1047,7 @@ class _UTPSocket extends UTPSocket {
     // cwnd = max(cwnd, 150);
 
     var current_delay = currentDelay;
-    if (current_delay == 0) return;
+    if (current_delay == 0 || minPacketRTT == null) return;
     var our_delay =
         min(minPacketRTT, current_delay); // delay会影响增加窗口的大小，这种获得的delay增加窗口会很激进
     // var our_delay = current_delay; // 这种方法会温和一些
@@ -1170,8 +1174,8 @@ class _UTPSocket extends UTPSocket {
 
     if (newSeqAcked && isAckType) _ledbatControl(ackedSize, currentDelay);
     if (hasLost) {
-      dev.log('Lose packets, half cut window size and packet size',
-          name: runtimeType.toString());
+      // dev.log('Lose packets, half cut window size and packet size',
+      //     name: runtimeType.toString());
       _allowWindowSize = _allowWindowSize ~/ 2;
     }
 
@@ -1227,9 +1231,9 @@ class _UTPSocket extends UTPSocket {
         await _closeCompleter.future;
         return;
       }
-      dev.log(
-          'Send data/SYN timeout (${times + 1}/$MAX_TIMEOUT) , reset window/packet to min size($MIN_PACKET_SIZE bytes)',
-          name: runtimeType.toString());
+      // dev.log(
+      //     'Send data/SYN timeout (${times + 1}/$MAX_TIMEOUT) , reset window/packet to min size($MIN_PACKET_SIZE bytes)',
+      //     name: runtimeType.toString());
       _allowWindowSize = MIN_PACKET_SIZE;
       _packetSize = MIN_PACKET_SIZE;
       // print('更改packet size: $_packetSize , max window : $_allowWindowSize');
@@ -1327,7 +1331,7 @@ class _UTPSocket extends UTPSocket {
     var seq = packet.seq_nr;
     if (_finalRemoteFINSeq != null) {
       if (compareSeqLess(_finalRemoteFINSeq, seq)) {
-        dev.log('Over FIN seq：$seq($_finalRemoteFINSeq)');
+        // dev.log('Over FIN seq：$seq($_finalRemoteFINSeq)');
         return;
       }
     }
@@ -1431,9 +1435,9 @@ class _UTPSocket extends UTPSocket {
     var sendBytes = _socket?.send(bytes, remoteAddress, remotePort);
     var success = sendBytes > 0;
     if (success) {
-      dev.log(
-          'Send(${_Type2Map[packet.type]}) : seq : ${packet.seq_nr} , ack : ${packet.ack_nr},length:${packet.length}',
-          name: runtimeType.toString());
+      // dev.log(
+      //     'Send(${_Type2Map[packet.type]}) : seq : ${packet.seq_nr} , ack : ${packet.ack_nr},length:${packet.length}',
+      //     name: runtimeType.toString());
       if (packet.type == ST_DATA ||
           packet.type == ST_SYN ||
           packet.type == ST_FIN) {
@@ -1547,9 +1551,9 @@ void _processReceiveData(
   //     '收到对方${TYPE_NAME[packetData.type]}包:seq_nr:${packetData.seq_nr} , ack_nr : ${packetData.ack_nr}');
   // if (packetData.dataExtension != null) print('有Extension');
   if (socket != null && socket.isClosed) return;
-  dev.log(
-      'Receive(${_Type2Map[packetData.type]}) : seq : ${packetData.seq_nr} , ack : ${packetData.ack_nr}',
-      name: 'utp_protocol_impelement');
+  // dev.log(
+  //     'Receive(${_Type2Map[packetData.type]}) : seq : ${packetData.seq_nr} , ack : ${packetData.ack_nr}',
+  //     name: 'utp_protocol_impelement');
   switch (packetData.type) {
     case ST_SYN:
       _processSYNMessage(
@@ -1597,9 +1601,9 @@ void _processSYNMessage(_UTPSocket socket, RawDatagramSocket rawSocket,
   if (socket != null) {
     _sendResetMessage(
         packetData.connectionId, rawSocket, remoteAddress, remotePort);
-    dev.log(
-        'Duplicated connection id or error data type , reset the connection',
-        name: 'utp_protocol_implement');
+    // dev.log(
+    //     'Duplicated connection id or error data type , reset the connection',
+    //     name: 'utp_protocol_implement');
     return;
   }
   var connId = (packetData.connectionId + 1) & MAX_UINT16;
