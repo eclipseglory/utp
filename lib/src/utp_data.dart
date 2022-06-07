@@ -73,15 +73,15 @@ class UTPPacket {
   int type;
 
   /// The data payload buffer
-  List<int> payload;
+  List<int>? payload;
 
   // Extensions
   List<Extension> extensionList = <Extension>[];
 
-  Uint8List _bytes;
+  Uint8List? _bytes;
 
   int get length {
-    if (payload != null) return payload.length - offset;
+    if (payload != null) return payload!.length - offset;
     return 0;
   }
 
@@ -97,16 +97,10 @@ class UTPPacket {
       {this.version = VERSION, this.payload, this.offset = 0}) {
     assert(type <= 15 && type >= 0, 'Bad type');
     assert(version <= 15 && version >= 0, 'Bad version');
-    assert(connectionId != null, 'Bad connection id');
     connectionId &= MAX_UINT16;
-    assert(wnd_size != null, 'Bad wnd_size');
     wnd_size &= MAX_UINT32;
-    assert(seq_nr != null, 'Bad seq_nr');
     seq_nr &= MAX_UINT16;
-    assert(ack_nr != null, 'Bad ack_nr');
     ack_nr &= MAX_UINT16;
-    assert(sendTime != null, 'Bad timestamp');
-    assert(timestampDifference != null, 'Bad time difference');
   }
 
   void addExtension(Extension ext) {
@@ -130,7 +124,7 @@ class UTPPacket {
   ///
   /// [time] is the timestamp , sometimes we need get a new bytes buffer with
   /// different timestamp.
-  Uint8List getBytes({int time, int wndSize, int timeDiff, int seq, int ack}) {
+  Uint8List? getBytes({int? time, int? wndSize, int? timeDiff, int? seq, int? ack}) {
     sendTime = time ?? sendTime;
     wnd_size = wndSize ?? wnd_size;
     wnd_size &= MAX_UINT32;
@@ -141,16 +135,16 @@ class UTPPacket {
     ack_nr &= MAX_UINT16;
 
     if (_bytes == null) {
-      var p = payload;
+      List<int?>? p = payload;
       if (offset != 0) {
-        p = List<int>(payload.length - offset);
-        List.copyRange(p, 0, payload, offset);
+        p = List<int?>.filled(payload!.length - offset, null, growable: false);
+        List.copyRange(p, 0, payload!, offset);
       }
       _bytes = _createData(type, connectionId, sendTime, timestampDifference,
           wnd_size, seq_nr, ack_nr,
           payload: p, extensions: extensionList);
     } else {
-      var view = ByteData.view(_bytes.buffer);
+      var view = ByteData.view(_bytes!.buffer);
       view.setUint32(4, sendTime & MAX_UINT32);
       view.setUint32(8, timestampDifference & MAX_UINT32);
       view.setUint32(12, wnd_size);
@@ -216,18 +210,14 @@ class Extension {
   int start;
 
   Extension(this.id, this.length, this.payload, [this.start = 0]) {
-    assert(
-        id != null && length != null && payload != null && payload.length >= 4,
-        'Bad extension parameters');
+    assert(payload.length >= 4, 'Bad extension parameters');
   }
 }
 
 class SelectiveACK extends Extension {
   final int _ack;
   SelectiveACK(this._ack, int length, List<int> payload, [int start = 0])
-      : super(1, length, payload, start) {
-    assert(_ack != null, 'Bad ACK number');
-  }
+      : super(1, length, payload, start);
 
   List<int> getAckeds() {
     var l = <int>[];
@@ -249,17 +239,17 @@ class SelectiveACK extends Extension {
     if (seq < _ack + 2) return;
     var v = seq - _ack - 2;
     var index = v ~/ 8;
-    var offset = v.remainder(8);
+    num offset = v.remainder(8);
     var nu = payload[start + index];
     var base = 1;
-    base = base << offset;
+    base = base << (offset as int);
     payload[start + index] = nu | base;
   }
 }
 
 Uint8List _createData(int type, int connectionId, int timestamp,
     int timestampDifference, int wnd_size, int seq_nr, int ack_nr,
-    {int version = VERSION, List<Extension> extensions, List<int> payload}) {
+    {int version = VERSION, List<Extension>? extensions, List<int?>? payload}) {
   assert(type <= 15 && type >= 0, 'Bad type');
   assert(version <= 15 && version >= 0, 'Bad version');
   connectionId &= MAX_UINT16;
@@ -279,8 +269,8 @@ Uint8List _createData(int type, int connectionId, int timestamp,
     view = ByteData.view(bytes.buffer);
     view.setUint8(1, 0); // 没有extension
   } else {
-    var extlen = extensions.fold(
-        0, (previousValue, element) => previousValue + element.length + 2);
+    var extlen = extensions.fold<int>(
+        0, (dynamic previousValue, element) => previousValue + element.length + 2);
     payloadStart += extlen;
     bytes = Uint8List(20 + extlen + payloadLen);
     view = ByteData.view(bytes.buffer);
@@ -307,19 +297,19 @@ Uint8List _createData(int type, int connectionId, int timestamp,
   view.setUint16(16, seq_nr);
   view.setUint16(18, ack_nr);
   if (payloadLen > 0) {
-    List.copyRange(bytes, payloadStart, payload);
+    List.copyRange(bytes, payloadStart, payload!);
   }
   return bytes;
 }
 
 /// Parse bytes [data] to `UTPData` instance
-UTPPacket parseData(List<int> datas) {
+UTPPacket? parseData(List<int>? datas) {
   if (datas == null || datas.isEmpty || datas.length < 20) return null;
   var data = Uint8List.fromList(datas);
   var view = ByteData.view(data.buffer);
   var first = data[0];
   var type = first ~/ 16;
-  var version = first.remainder(16);
+  num version = first.remainder(16);
   var nextExt = data[1];
 
   var cid = view.getUint16(2);
@@ -330,7 +320,7 @@ UTPPacket parseData(List<int> datas) {
   var ack = view.getUint16(18);
   var offset = 20;
   var packet = UTPPacket(type, cid, ts, tsd, wnd, seq, ack,
-      version: version, payload: data, offset: offset);
+      version: version as int, payload: data, offset: offset);
   while (nextExt != 0) {
     Extension ext;
     if (nextExt == 1) {
@@ -360,7 +350,7 @@ String intToRadix2String(int i) {
 }
 
 /// Get 53bit timestamp
-int getNowTimestamp([int offset = 0]) {
+int getNowTimestamp([int? offset = 0]) {
   offset ??= 0;
   return DateTime.now().microsecondsSinceEpoch - offset;
 }

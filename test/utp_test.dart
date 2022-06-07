@@ -9,9 +9,9 @@ void main() {
     test(' only header create/parse', () {
       var time = DateTime.now().microsecondsSinceEpoch;
       var p = UTPPacket(ST_RESET, 1, time, 2, 3, 4, 5);
-      var data = p.getBytes();
+      var data = p.getBytes()!;
       assert(data.length == 20);
-      var header = parseData(data);
+      var header = parseData(data)!;
       assert(header.type == ST_RESET);
       assert(header.version == VERSION);
       assert(header.sendTime == time & MAX_UINT32);
@@ -24,8 +24,8 @@ void main() {
     test(' only header with extension create/parse', () {
       var time = DateTime.now().microsecondsSinceEpoch;
       var packet = UTPPacket(ST_RESET, 1, time, 2, 3, 4, 5);
-      var data = packet.getBytes();
-      var header = parseData(data);
+      var data = packet.getBytes()!;
+      var header = parseData(data)!;
       assert(header.type == ST_RESET);
       assert(header.version == VERSION);
       assert(header.sendTime == time & MAX_UINT32);
@@ -39,8 +39,8 @@ void main() {
     test(' only header with extension create/parse 2', () {
       var time = DateTime.now().microsecondsSinceEpoch;
       var packet = UTPPacket(ST_RESET, 1, time, 2, 3, 4, 5);
-      var data = packet.getBytes();
-      var header = parseData(data);
+      var data = packet.getBytes()!;
+      var header = parseData(data)!;
       assert(header.type == ST_RESET);
       assert(header.version == VERSION);
       assert(header.sendTime == time & MAX_UINT32);
@@ -69,7 +69,7 @@ void main() {
 
       var bytes = packet.getBytes();
 
-      var packet1 = parseData(bytes);
+      var packet1 = parseData(bytes)!;
 
       assert(packet1.type == packet.type);
       assert(packet1.version == VERSION);
