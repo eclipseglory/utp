@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 import 'dart:typed_data';
 
@@ -21,7 +22,7 @@ void main(List<String> args) async {
   print('Server listening: $port');
   var client = UTPSocketClient();
   var socket =
-      await client.connect(InternetAddress.tryParse('127.0.0.1'), port);
+      await (client.connect(InternetAddress.tryParse('127.0.0.1'), port) as FutureOr<UTPSocket>);
   socket.listen((datas) {}, onDone: () async {
     print('client socket closed');
     await client.close();
