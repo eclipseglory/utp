@@ -1,7 +1,8 @@
 import 'dart:convert';
 import 'dart:io';
 
-import 'package:utp/src/utp_protocol_implement.dart';
+import 'package:utp/src/base/server_utp_socket.dart';
+import 'package:utp/src/utp_socket_client.dart';
 
 void main() async {
   var total = 21889;
@@ -33,14 +34,14 @@ void main() async {
   });
 
   var pool = UTPSocketClient();
-  var s1 = await pool.connect(InternetAddress.tryParse('127.0.0.1'), port);
+  var s1 = await pool.connect(InternetAddress.tryParse('127.0.0.1')!, port!);
   var cbys = utf8.encode(chinese).length;
   print(
-      '[Client] Connect ${s1.remoteAddress.address}:${s1.remotePort}[${s1.connectionId}] successfully. Start to send ${(total * cbys) / 1024}kb datas');
+      '[Client] Connect ${s1?.remoteAddress.address}:${s1?.remotePort}[${s1?.connectionId}] successfully. Start to send ${(total * cbys) / 1024}kb datas');
   for (var i = 0; i < total; i++) {
-    s1.write(chinese);
+    s1?.write(chinese);
   }
-  await s1.close();
+  await s1?.close();
   print('[Client] Client closed');
   await pool.close();
 }

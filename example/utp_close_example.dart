@@ -1,6 +1,8 @@
 import 'dart:io';
 import 'dart:typed_data';
 
+import 'package:utp/src/base/server_utp_socket.dart';
+import 'package:utp/src/utp_socket_client.dart';
 import 'package:utp/utp.dart';
 
 void main(List<String> args) async {
@@ -21,11 +23,11 @@ void main(List<String> args) async {
   print('Server listening: $port');
   var client = UTPSocketClient();
   var socket =
-      await client.connect(InternetAddress.tryParse('127.0.0.1'), port);
-  socket.listen((datas) {}, onDone: () async {
+      await client.connect(InternetAddress.tryParse('127.0.0.1')!, port!);
+  socket?.listen((datas) {}, onDone: () async {
     print('client socket closed');
     await client.close();
   });
-  socket.add(Uint8List.fromList('byte'.codeUnits));
-  await socket.close();
+  socket?.add(Uint8List.fromList('byte'.codeUnits));
+  await socket?.close();
 }

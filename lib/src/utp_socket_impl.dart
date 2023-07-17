@@ -5,431 +5,21 @@ import 'dart:io';
 import 'dart:math';
 import 'dart:typed_data';
 
+import 'utils.dart';
+import 'enums/utp_connection_state.dart';
 import 'utp_data.dart';
+import 'utp_server_impl.dart';
+import 'base/utp_socket.dart';
+import 'base/utp_close_handler.dart';
 
-const MAX_TIMEOUT = 5;
-
-/// 100 ms = 100000 micro seconds
-const CCONTROL_TARGET = 100000;
-
-/// Each UDP packet should less than 1400 bytes
-const MAX_PACKET_SIZE = 1382;
-
-const MIN_PACKET_SIZE = 150;
-
-const MAX_CWND_INCREASE_PACKETS_PER_RTT = 3000;
-
-///
-/// UTP socket client.
-///
-/// This class can connect remote UTP socket. One UTPSocketClient
-/// can create multiple UTPSocket.
-///
-/// See also [ServerUTPSocket]
-class UTPSocketClient extends _UTPCloseHandler with _UTPSocketRecorder {
-  bool _closed = false;
-
-  /// 是否已被销毁
-  bool get isClosed => _closed;
-
-  /// Each UDP socket can handler max connections
-  final int maxSockets;
-
-  RawDatagramSocket _rawSocket;
-
-  UTPSocketClient([this.maxSockets = 10]);
-
-  InternetAddress address;
-
-  final Map<int, Completer<UTPSocket>> _connectingSocketMap = {};
-
-  bool get isFull => indexMap.length >= maxSockets;
-
-  bool get isNotFull => !isFull;
-
-  /// Connect remote UTP server socket.
-  ///
-  /// If [remoteAddress] and [remotePort] related socket was connectted already ,
-  /// it will return a `Future` with `UTPSocket` instance directly;
-  ///
-  /// or this method will try to create a new `UTPSocket` instance to connect remote,
-  /// once connect succesffully , the return `Future` will complete with the instance ,
-  /// if connect fail , the `Future` will complete with an exception.
-  Future<UTPSocket> connect(InternetAddress remoteAddress, int remotePort,
-      [int localPort = 0]) async {
-    _closed = false;
-    assert(remotePort != null && remoteAddress != null,
-        'Address and port can not be null');
-    if (indexMap.length >= maxSockets) return null;
-    if (_rawSocket == null) {
-      _rawSocket =
-          await RawDatagramSocket.bind(InternetAddress.anyIPv4, localPort);
-      _rawSocket.listen((event) => _onData(event),
-          onDone: () => _onDone(), onError: (e) => _onError(e));
-    }
-
-    var connId = Random().nextInt(MAX_UINT16);
-    var utp = _UTPSocket(_rawSocket, remoteAddress, remotePort);
-    var completer = Completer<UTPSocket>();
-    _connectingSocketMap[connId] = completer;
-
-    utp.connectionState = _UTPConnectState.SYN_SENT; //修改socket连接状态
-    // 初始化send_id 和_receive_id
-    utp.receiveId = connId; //初始一个随机的connection id
-    utp.sendId = (utp.receiveId + 1) & MAX_UINT16;
-    utp.sendId &= MAX_UINT16; // 防止溢出
-    utp.currentLocalSeq = Random().nextInt(MAX_UINT16); // 随机一个seq;
-    utp.lastRemoteSeq = 0; // 这个设为0，起始是没有得到远程seq的
-    utp.lastRemotePktTimestamp = 0;
-    utp.closeHandler = this;
-    var packet = UTPPacket(ST_SYN, connId, 0, 0, utp.maxWindowSize,
-        utp.currentLocalSeq, utp.lastRemoteSeq);
-    utp.sendPacket(packet, 0, true, true);
-    recordUTPSocket(connId, utp);
-    return completer.future;
-  }
-
-  void _onData(RawSocketEvent event) {
-    if (event == RawSocketEvent.read) {
-      var datagram = _rawSocket.receive();
-      if (datagram == null) return;
-      var address = datagram.address;
-      var port = datagram.port;
-      UTPPacket data;
-      try {
-        data = parseData(datagram.data);
-      } catch (e) {
-        dev.log('Process receive data error :',
-            error: e, name: runtimeType.toString());
-        return;
-      }
-      if (data == null) {
-        dev.log('Process receive data error :',
-            error: 'Data is null', name: runtimeType.toString());
-        return;
-      }
-      var connId = data.connectionId;
-      var utp = findUTPSocket(connId);
-      if (utp == null) {
-        dev.log('UTP error',
-            error: 'Can not find connection $connId',
-            name: runtimeType.toString());
-        return;
-      }
-      var completer = _connectingSocketMap.remove(connId);
-      _processReceiveData(utp?._socket, address, port, data, utp,
-          onConnected: (socket) {
-            socket.closeHandler = this;
-            completer?.complete(socket);
-          },
-          onError: (socket, error) => completer?.completeError(error));
-    }
-  }
-
-  void _onDone() async {
-    await close('Local/Remote closed the connection');
-  }
-
-  void _onError(dynamic e) {
-    dev.log('UDP socket error:', error: e, name: runtimeType.toString());
-  }
-
-  /// Close the raw UDP socket and all UTP sockets
-  Future close([dynamic reason]) async {
-    if (isClosed) return;
-    _closed = true;
-    _rawSocket?.close();
-    _rawSocket = null;
-    var f = <Future>[];
-    indexMap.forEach((key, socket) {
-      var r = socket?.close();
-      if (r != null) f.add(r);
-    });
-    clean();
-
-    _connectingSocketMap.forEach((key, c) {
-      if (c != null && !c.isCompleted) {
-        c.completeError('Socket was disposed');
-      }
-    });
-    _connectingSocketMap.clear();
-    return Stream.fromFutures(f).toList();
-  }
+class UTPSocketImpl extends UTPSocket {
+  @override
+  bool get isConnected => connectionState == UTPConnectState.CONNECTED;
 
   @override
-  void socketClosed(_UTPSocket socket) {
-    if (socket == null) return;
-    removeUTPSocket(socket.connectionId);
-    var completer = _connectingSocketMap.remove(socket.connectionId);
-    if (completer != null && !completer.isCompleted) {
-      completer.completeError('Connect remote failed');
-    }
-  }
-}
+  int? get connectionId => receiveId;
 
-///
-/// This class will create a UTP socket to listening income UTP socket.
-///
-/// See also [UTPSocketClient]
-abstract class ServerUTPSocket extends _UTPCloseHandler {
-  int get port;
-
-  InternetAddress get address;
-
-  Future<dynamic> close([dynamic reason]);
-
-  StreamSubscription<UTPSocket> listen(void Function(UTPSocket socket) onData,
-      {Function onError, void Function() onDone, bool cancelOnError});
-
-  static Future<ServerUTPSocket> bind(dynamic host, [int port = 0]) async {
-    var _socket = await RawDatagramSocket.bind(host, port);
-    return _ServerUTPSocket(_socket);
-  }
-}
-
-class _ServerUTPSocket extends ServerUTPSocket with _UTPSocketRecorder {
-  bool _closed = false;
-
-  bool get isClosed => _closed;
-
-  RawDatagramSocket _socket;
-
-  StreamController<UTPSocket> _sc;
-
-  _ServerUTPSocket(this._socket) {
-    assert(_socket != null, 'UDP socket parameter can not be null');
-    _sc = StreamController<UTPSocket>();
-
-    _socket.listen((event) {
-      if (event == RawSocketEvent.read) {
-        var datagram = _socket.receive();
-        if (datagram == null) return;
-        var address = datagram.address;
-        var port = datagram.port;
-        UTPPacket data;
-        try {
-          data = parseData(datagram.data);
-        } catch (e) {
-          dev.log('Process receive data error :',
-              error: e, name: runtimeType.toString());
-          return;
-        }
-        if (data == null) {
-          dev.log('Process receive data error :',
-              error: 'Data is null', name: runtimeType.toString());
-          return;
-        }
-        var connId = data.connectionId;
-        var utp = findUTPSocket(connId);
-        _processReceiveData(_socket, address, port, data, utp,
-            newSocket: (socket) {
-              recordUTPSocket(socket.connectionId, socket);
-              socket.closeHandler = this;
-            },
-            onConnected: (socket) => _sc?.add(socket));
-      }
-    }, onDone: () {
-      close('Remote/Local socket closed');
-    }, onError: (e) {
-      dev.log('UDP error:', error: e, name: runtimeType.toString());
-    });
-  }
-
-  @override
-  InternetAddress get address => _socket?.address;
-
-  @override
-  int get port => _socket?.port;
-
-  @override
-  Future<dynamic> close([dynamic reason]) async {
-    if (isClosed) return;
-    _closed = true;
-    var l = <Future>[];
-    forEach((socket) {
-      var r = socket?.close(reason);
-      if (r != null) l.add(r);
-    });
-
-    await Stream.fromFutures(l).toList();
-
-    _socket?.close();
-    _socket = null;
-    var re = await _sc?.close();
-    _sc = null;
-    return re;
-  }
-
-  @override
-  StreamSubscription<UTPSocket> listen(void Function(UTPSocket p1) onData,
-      {Function onError, void Function() onDone, bool cancelOnError}) {
-    return _sc?.stream?.listen(onData,
-        onError: onError, onDone: onDone, cancelOnError: cancelOnError);
-  }
-
-  @override
-  void socketClosed(_UTPSocket socket) {
-    removeUTPSocket(socket.connectionId);
-  }
-}
-
-///
-/// Record uTP socket with its remote address and remote port.
-///
-/// This mixin provide some methods to record/find/remove uTP socket
-/// instance.
-///
-/// This mixin use two simple `Map` to record the socket instance currentlly
-mixin _UTPSocketRecorder {
-  final Map<int, _UTPSocket> indexMap = {};
-
-  /// Get the `UTPSocket` via [connectionId]
-  ///
-  /// If not found , return `null`
-  _UTPSocket findUTPSocket(int connectionId) {
-    return indexMap[connectionId];
-  }
-
-  /// Record the `UTPSocket` via [connectionId]
-  ///
-  /// If it have a instance already , it will replace it with the new instance
-  void recordUTPSocket(int connectionId, _UTPSocket s) {
-    indexMap[connectionId] = s;
-  }
-
-  _UTPSocket removeUTPSocket(int connectionId) {
-    return indexMap.remove(connectionId);
-  }
-
-  /// For each
-  void forEach(void Function(UTPSocket socket) processer) {
-    indexMap.forEach((key, value) {
-      processer(value);
-    });
-  }
-
-  /// clean the record map
-  void clean() {
-    indexMap.clear();
-  }
-}
-
-/// UTP socket
-///
-/// More details please take a look :
-/// [UTP Micro_Transport_Protocol](http://en.wikipedia.org/wiki/Micro_Transport_Protocol)
-abstract class UTPSocket extends Socket {
-  /// Is UTP socket connected to remote
-  bool get isConnected;
-
-  /// 这是用于通讯的真正的UDP socket
-  final RawDatagramSocket _socket;
-
-  /// The connection id between this socket with remote socket
-  int get connectionId;
-
-  /// Another side socket internet address
-  @override
-  final InternetAddress remoteAddress;
-
-  /// Another side socket internet port
-  @override
-  final int remotePort;
-
-  @override
-  InternetAddress get address => _socket?.address;
-
-  /// Local internet port
-  @override
-  int get port => _socket?.port;
-
-  /// The max window size. ready-only
-  final int maxWindowSize;
-
-  /// The encoding for encode/decode string message.
-  ///
-  /// See also [write]
-  @override
-  Encoding encoding;
-
-  /// [_socket] is a UDP socket instance.
-  ///
-  /// [remoteAddress] and [remotePort] is another side uTP address and port
-  ///
-  UTPSocket(this._socket, this.remoteAddress, this.remotePort,
-      {this.maxWindowSize = 1048576, this.encoding = utf8}) {
-    assert(_socket != null, 'UDP socket can not be null');
-    assert(remoteAddress != null, 'Remote internet address can not be null');
-    assert(remotePort != null, 'Remote port can not be null');
-  }
-
-  /// Send ST_FIN message to remote and close the socket.
-  ///
-  /// If remote don't reply ST_STATE to local for ST_FIN message , this socket
-  /// will wait when timeout happen and close itself force.
-  ///
-  /// If socket is closed , it can't connect agian , if need to reconnect
-  /// new a socket instance.
-  @override
-  Future<dynamic> close([dynamic reason]);
-
-  /// This socket was closed no not
-  bool get isClosed;
-
-  /// Useless method
-  @deprecated
-  @override
-  bool setOption(SocketOption option, bool enabled) {
-    // TODO: implement setOption
-    return false;
-  }
-
-  /// Useless method
-  @deprecated
-  @override
-  void setRawOption(RawSocketOption option) {
-    // TODO: implement setRawOption
-  }
-
-  /// Useless method
-  @deprecated
-  @override
-  Uint8List getRawOption(RawSocketOption option) {
-    // TODO: implement getRawOption
-    return null;
-  }
-}
-
-/// UTP socket connection state.
-enum _UTPConnectState {
-  /// UTP socket send then SYN message to another for connecting
-  SYN_SENT,
-
-  /// UTP socket receive a SYN message from another
-  SYN_RECV,
-
-  /// UTP socket was connected with another one.
-  CONNECTED,
-
-  /// UTP socket was closed
-  CLOSED,
-
-  /// UTP socket is closing
-  CLOSING
-}
-
-abstract class _UTPCloseHandler {
-  void socketClosed(_UTPSocket socket);
-}
-
-class _UTPSocket extends UTPSocket {
-  @override
-  bool get isConnected => connectionState == _UTPConnectState.CONNECTED;
-
-  @override
-  int get connectionId => receiveId;
-
-  _UTPConnectState connectionState;
+  UTPConnectState? connectionState;
 
   // int _timeoutCounterTime = 1000;
 
@@ -437,9 +27,9 @@ class _UTPSocket extends UTPSocket {
 
   final int maxInflightPackets = 2;
 
-  double _srtt;
+  double? _srtt;
 
-  double _rttvar;
+  double? _rttvar;
 
   /// 超时时间，单位微妙
   double _rto = 1000000.0;
@@ -447,16 +37,14 @@ class _UTPSocket extends UTPSocket {
   // double _rtt = 0.0;
 
   // double _rtt_var = 800.0;
-
-  int sendId;
+//TODO:Test late initilzation
+  late int sendId;
 
   int _currentLocalSeq = 0;
 
   /// Make sure the num dont over max uint16
   int _getUint16Int(int v) {
-    if (v != null) {
-      v = v & MAX_UINT16;
-    }
+    v = v & MAX_UINT16;
     return v;
   }
 
@@ -472,23 +60,23 @@ class _UTPSocket extends UTPSocket {
 
   set lastRemoteSeq(v) => _lastRemoteSeq = _getUint16Int(v);
 
-  int _lastRemoteAck;
+  int? _lastRemoteAck;
 
-  int _finalRemoteFINSeq;
+  int? _finalRemoteFINSeq;
 
-  Timer _FINTimer;
+  Timer? _FINTimer;
 
   /// The last packet remote acked.
-  int get lastRemoteAck => _lastRemoteAck;
+  int? get lastRemoteAck => _lastRemoteAck;
 
   set lastRemoteAck(v) => _lastRemoteAck = _getUint16Int(v);
 
   /// The timestamp when receive the last remote packet
-  int lastRemotePktTimestamp;
+  int? lastRemotePktTimestamp;
 
-  int remoteWndSize;
+  int? remoteWndSize;
 
-  int receiveId;
+  int? receiveId;
 
   final Map<int, UTPPacket> _inflightPackets = <int, UTPPacket>{};
 
@@ -496,28 +84,29 @@ class _UTPSocket extends UTPSocket {
 
   int _currentWindowSize = 0;
 
-  Timer _rtoTimer;
+  Timer? _rtoTimer;
 
   bool _closed = false;
 
-  int minPacketRTT;
+  int? minPacketRTT;
 
   final List<List<int>> _baseDelays = <List<int>>[];
 
   /// 发送FIN消息并关闭socket的一个future控制completer
-  Completer _closeCompleter;
+  Completer _closeCompleter = Completer();
 
   @override
   bool get isClosed => _closed;
 
   /// 正在关闭
-  bool get isClosing => connectionState == _UTPConnectState.CLOSING;
+  bool get isClosing => connectionState == UTPConnectState.CLOSING;
 
-  StreamController<Uint8List> _receiveDataStreamController;
+  final StreamController<Uint8List> _receiveDataStreamController =
+      StreamController<Uint8List>();
 
   final List<UTPPacket> _receivePacketBuffer = <UTPPacket>[];
 
-  Timer _addDataTimer;
+  Timer? _addDataTimer;
 
   final List<int> _sendingDataCache = <int>[];
 
@@ -527,31 +116,26 @@ class _UTPSocket extends UTPSocket {
 
   final Map<int, Timer> _requestSendAckMap = <int, Timer>{};
 
-  Timer _keepAliveTimer;
+  Timer? _keepAliveTimer;
 
-  int _startTimeOffset;
+  int? _startTimeOffset;
 
-  int _allowWindowSize;
+  int _allowWindowSize = MIN_PACKET_SIZE; // _packetSize * 2;
 
-  _UTPCloseHandler _handler;
+  UTPCloseHandler? _handler;
 
   bool _finSended = false;
 
-  set closeHandler(_UTPCloseHandler h) {
+  set closeHandler(UTPCloseHandler h) {
     _handler = h;
   }
 
-  _UTPSocket(RawDatagramSocket socket,
-      [InternetAddress remoteAddress,
-      int remotePort,
-      int maxWindow = 1048576,
-      Encoding encoding = utf8])
+  UTPSocketImpl(
+      RawDatagramSocket socket, InternetAddress remoteAddress, int remotePort,
+      [int maxWindow = 1048576, Encoding encoding = utf8])
       : super(socket, remoteAddress, remotePort,
             maxWindowSize: maxWindow, encoding: encoding) {
-    _allowWindowSize = MIN_PACKET_SIZE; // _packetSize * 2;
     // _allowWindowSize = maxWindow;
-    _packetSize = MIN_PACKET_SIZE;
-    _receiveDataStreamController = StreamController<Uint8List>();
   }
 
   bool isInCurrentAckWindow(int seq) {
@@ -570,8 +154,7 @@ class _UTPSocket extends UTPSocket {
   void startKeepAlive() {
     _keepAliveTimer?.cancel();
     _keepAliveTimer = Timer(Duration(seconds: 30), () {
-      var ack = 0;
-      if (_lastRemoteSeq != null) ack = (_lastRemoteSeq - 1) & MAX_UINT16;
+      var ack = (_lastRemoteSeq - 1) & MAX_UINT16;
       // dev.log('Send keepalive message', name: runtimeType.toString());
       var packet = UTPPacket(
           ST_STATE, sendId, 0, 0, maxWindowSize, currentLocalSeq, ack);
@@ -583,18 +166,16 @@ class _UTPSocket extends UTPSocket {
   ///
   /// 当发送数据buffer没有数据，并且[_closeCompleter]不为空，则会发送FIN消息给对方
   ///
-  void _requestSendData([List<int> data]) {
+  void _requestSendData([List<int>? data]) {
     if (data != null && data.isNotEmpty) _sendingDataBuffer.addAll(data);
     if (_sendingDataBuffer.isEmpty) {
-      if (_closeCompleter != null &&
-          !_closeCompleter.isCompleted &&
-          _sendingDataCache.isEmpty) {
+      if (!_closeCompleter.isCompleted && _sendingDataCache.isEmpty) {
         // 这说明此时可以发送FIN消息
         _sendFIN();
       }
       return;
     }
-    var window = min(_allowWindowSize, remoteWndSize);
+    var window = min(_allowWindowSize, remoteWndSize ?? 0);
     var allowSize = window - _currentWindowSize;
     if (allowSize <= 0) {
       return;
@@ -641,89 +222,88 @@ class _UTPSocket extends UTPSocket {
 
   @override
   Future<bool> any(bool Function(Uint8List) test) {
-    return _receiveDataStreamController?.stream?.any(test);
+    return _receiveDataStreamController.stream.any(test);
   }
 
   @override
-  Stream<E> asyncExpand<E>(Stream<E> Function(Uint8List) convert) {
-    return _receiveDataStreamController?.stream?.asyncExpand(convert);
+  Stream<E> asyncExpand<E>(Stream<E>? Function(Uint8List) convert) {
+    return _receiveDataStreamController.stream.asyncExpand(convert);
   }
 
   @override
   Stream<E> asyncMap<E>(FutureOr<E> Function(Uint8List) convert) {
-    return _receiveDataStreamController?.stream?.asyncMap(convert);
+    return _receiveDataStreamController.stream.asyncMap(convert);
   }
 
   @override
   Stream<R> cast<R>() {
-    return _receiveDataStreamController?.stream?.cast<R>();
+    return _receiveDataStreamController.stream.cast<R>();
   }
 
   @override
-  Future<bool> contains(Object needle) {
-    return _receiveDataStreamController?.stream?.contains(needle);
+  Future<bool> contains(Object? needle) {
+    return _receiveDataStreamController.stream.contains(needle);
   }
 
   @override
-  Stream<Uint8List> distinct([bool Function(Uint8List, Uint8List) equals]) {
-    return _receiveDataStreamController?.stream?.distinct(equals);
+  Stream<Uint8List> distinct([bool Function(Uint8List, Uint8List)? equals]) {
+    return _receiveDataStreamController.stream.distinct(equals);
   }
 
   @override
-  Future<E> drain<E>([E futureValue]) {
-    return _receiveDataStreamController?.stream?.drain<E>(futureValue);
+  Future<E> drain<E>([E? futureValue]) {
+    return _receiveDataStreamController.stream.drain<E>(futureValue);
   }
 
   @override
   Future<Uint8List> elementAt(int index) {
-    return _receiveDataStreamController?.stream?.elementAt(index);
+    return _receiveDataStreamController.stream.elementAt(index);
   }
 
   @override
   Future<bool> every(bool Function(Uint8List) test) {
-    return _receiveDataStreamController?.stream?.every(test);
+    return _receiveDataStreamController.stream.every(test);
   }
 
   @override
   Stream<S> expand<S>(Iterable<S> Function(Uint8List) convert) {
-    return _receiveDataStreamController?.stream?.expand<S>((convert));
+    return _receiveDataStreamController.stream.expand<S>((convert));
   }
 
   @override
   Future<S> fold<S>(S initialValue, S Function(S, Uint8List) combine) {
-    return _receiveDataStreamController?.stream?.fold<S>(initialValue, combine);
+    return _receiveDataStreamController.stream.fold<S>(initialValue, combine);
   }
 
   @override
   Future<dynamic> forEach(void Function(Uint8List) action) {
-    return _receiveDataStreamController?.stream?.forEach(action);
+    return _receiveDataStreamController.stream.forEach(action);
   }
 
   @override
   Stream<Uint8List> handleError(Function onError,
-      {bool Function(dynamic) test}) {
-    return _receiveDataStreamController?.stream
-        ?.handleError(onError, test: test);
+      {bool Function(dynamic)? test}) {
+    return _receiveDataStreamController.stream.handleError(onError, test: test);
   }
 
   @override
-  void addError(dynamic error, [StackTrace stackTrace]) {
+  void addError(dynamic error, [StackTrace? stackTrace]) {
     if (isClosed || isClosing) return;
-    if (isConnected) _receiveDataStreamController?.addError(error, stackTrace);
+    if (isConnected) _receiveDataStreamController.addError(error, stackTrace);
   }
 
   @override
-  StreamSubscription<Uint8List> listen(void Function(Uint8List data) onData,
-      {Function onError, void Function() onDone, bool cancelOnError}) {
+  StreamSubscription<Uint8List> listen(void Function(Uint8List data)? onData,
+      {Function? onError, void Function()? onDone, bool? cancelOnError}) {
     if (isClosed) throw 'Socket is closed';
-    return _receiveDataStreamController?.stream?.listen(onData,
+    return _receiveDataStreamController.stream.listen(onData,
         onError: onError, onDone: onDone, cancelOnError: cancelOnError);
   }
 
   @override
   void add(List<int> data) {
     if (isClosed || isClosing) return;
-    if (isConnected && data != null && data.isNotEmpty) {
+    if (isConnected && data.isNotEmpty) {
       _addDataTimer?.cancel();
       _sendingDataCache.addAll(data);
       if (_sendingDataCache.isEmpty) return;
@@ -737,16 +317,14 @@ class _UTPSocket extends UTPSocket {
 
   @override
   Future addStream(Stream<List<int>> stream) {
-    if (stream == null) return Future.value();
     if (isClosed || isClosing) return Future.value();
-    if (_receiveDataStreamController == null) return Future.value();
     var c = Completer();
     stream.listen((event) {
       if (isClosed || isClosing) {
         c.completeError('Socket was closed/closing , can not add event');
         return;
       }
-      _receiveDataStreamController?.add(Uint8List.fromList(event));
+      _receiveDataStreamController.add(Uint8List.fromList(event));
     }, onDone: () {
       c.complete();
     }, onError: (e) {
@@ -757,148 +335,145 @@ class _UTPSocket extends UTPSocket {
 
   @override
   Stream<Uint8List> asBroadcastStream(
-      {void Function(StreamSubscription<Uint8List> subscription) onListen,
-      void Function(StreamSubscription<Uint8List> subscription) onCancel}) {
-    return _receiveDataStreamController?.stream
-        ?.asBroadcastStream(onListen: onListen, onCancel: onCancel);
+      {void Function(StreamSubscription<Uint8List> subscription)? onListen,
+      void Function(StreamSubscription<Uint8List> subscription)? onCancel}) {
+    return _receiveDataStreamController.stream
+        .asBroadcastStream(onListen: onListen, onCancel: onCancel);
   }
 
   /// Send ST_RESET message to remote and close this socket force.
   @override
   Future destroy() async {
-    connectionState = _UTPConnectState.CLOSING;
-    await _sendResetMessage(sendId, _socket, remoteAddress, remotePort);
-    _closeCompleter ??= Completer();
+    connectionState = UTPConnectState.CLOSING;
+    await sendResetMessage(sendId, socket, remoteAddress, remotePort);
     closeForce();
     return _closeCompleter.future;
   }
 
   @override
-  Future get done => _receiveDataStreamController?.done;
+  Future get done => _receiveDataStreamController.done;
 
   @override
-  Future<Uint8List> get first => _receiveDataStreamController?.stream?.first;
+  Future<Uint8List> get first => _receiveDataStreamController.stream.first;
 
   @override
   Future<Uint8List> firstWhere(bool Function(Uint8List element) test,
-      {Uint8List Function() orElse}) {
-    return _receiveDataStreamController?.stream
-        ?.firstWhere(test, orElse: orElse);
+      {Uint8List Function()? orElse}) {
+    return _receiveDataStreamController.stream.firstWhere(test, orElse: orElse);
   }
 
   @Deprecated('Useless')
   @override
   Future flush() {
     // TODO: implement flush
-    return null;
+    return Future.value(null);
   }
 
   @override
-  bool get isBroadcast => _receiveDataStreamController?.stream?.isBroadcast;
+  bool get isBroadcast => _receiveDataStreamController.stream.isBroadcast;
 
   @override
-  Future<bool> get isEmpty => _receiveDataStreamController?.stream?.isEmpty;
+  Future<bool> get isEmpty => _receiveDataStreamController.stream.isEmpty;
 
   @override
   Future<String> join([String separator = '']) {
-    return _receiveDataStreamController?.stream?.join(separator);
+    return _receiveDataStreamController.stream.join(separator);
   }
 
   @override
-  Future<Uint8List> get last => _receiveDataStreamController?.stream?.last;
+  Future<Uint8List> get last => _receiveDataStreamController.stream.last;
 
   @override
   Future<Uint8List> lastWhere(bool Function(Uint8List element) test,
-      {Uint8List Function() orElse}) {
-    return _receiveDataStreamController?.stream
-        ?.lastWhere(test, orElse: orElse);
+      {Uint8List Function()? orElse}) {
+    return _receiveDataStreamController.stream.lastWhere(test, orElse: orElse);
   }
 
   @override
-  Future<int> get length => _receiveDataStreamController?.stream?.length;
+  Future<int> get length => _receiveDataStreamController.stream.length;
 
   @override
   Stream<S> map<S>(S Function(Uint8List event) convert) {
-    return _receiveDataStreamController?.stream?.map(convert);
+    return _receiveDataStreamController.stream.map(convert);
   }
 
   @override
   Future pipe(StreamConsumer<Uint8List> streamConsumer) {
-    return _receiveDataStreamController?.stream?.pipe(streamConsumer);
+    return _receiveDataStreamController.stream.pipe(streamConsumer);
   }
 
   @override
   Future<Uint8List> reduce(
       Uint8List Function(Uint8List previous, Uint8List element) combine) {
-    return _receiveDataStreamController?.stream?.reduce(combine);
+    return _receiveDataStreamController.stream.reduce(combine);
   }
 
   @override
-  Future<Uint8List> get single => _receiveDataStreamController?.stream?.single;
+  Future<Uint8List> get single => _receiveDataStreamController.stream.single;
 
   @override
   Future<Uint8List> singleWhere(bool Function(Uint8List element) test,
-      {Uint8List Function() orElse}) {
-    return _receiveDataStreamController?.stream
-        ?.singleWhere(test, orElse: orElse);
+      {Uint8List Function()? orElse}) {
+    return _receiveDataStreamController.stream
+        .singleWhere(test, orElse: orElse);
   }
 
   @override
   Stream<Uint8List> skip(int count) {
-    return _receiveDataStreamController?.stream?.skip(count);
+    return _receiveDataStreamController.stream.skip(count);
   }
 
   @override
   Stream<Uint8List> skipWhile(bool Function(Uint8List element) test) {
-    return _receiveDataStreamController?.stream?.skipWhile(test);
+    return _receiveDataStreamController.stream.skipWhile(test);
   }
 
   @override
   Stream<Uint8List> take(int count) {
-    return _receiveDataStreamController?.stream?.take(count);
+    return _receiveDataStreamController.stream.take(count);
   }
 
   @override
   Stream<Uint8List> takeWhile(bool Function(Uint8List element) test) {
-    return _receiveDataStreamController?.stream?.takeWhile(test);
+    return _receiveDataStreamController.stream.takeWhile(test);
   }
 
   @override
   Stream<Uint8List> timeout(Duration timeLimit,
-      {void Function(EventSink<Uint8List> sink) onTimeout}) {
-    return _receiveDataStreamController?.stream
-        ?.timeout(timeLimit, onTimeout: onTimeout);
+      {void Function(EventSink<Uint8List> sink)? onTimeout}) {
+    return _receiveDataStreamController.stream
+        .timeout(timeLimit, onTimeout: onTimeout);
   }
 
   @override
   Future<List<Uint8List>> toList() {
-    return _receiveDataStreamController?.stream?.toList();
+    return _receiveDataStreamController.stream.toList();
   }
 
   @override
   Future<Set<Uint8List>> toSet() {
-    return _receiveDataStreamController?.stream?.toSet();
+    return _receiveDataStreamController.stream.toSet();
   }
 
   @override
   Stream<S> transform<S>(StreamTransformer<Uint8List, S> streamTransformer) {
-    return _receiveDataStreamController?.stream?.transform(streamTransformer);
+    return _receiveDataStreamController.stream.transform(streamTransformer);
   }
 
   @override
   Stream<Uint8List> where(bool Function(Uint8List event) test) {
-    return _receiveDataStreamController?.stream?.where(test);
+    return _receiveDataStreamController.stream.where(test);
   }
 
   @override
-  void write(Object obj) {
+  void write(Object? obj) {
     var str = obj?.toString();
     if (str != null && str.isNotEmpty) add(encoding.encode(str));
   }
 
   @override
   void writeAll(Iterable objects, [String separator = '']) {
-    if (objects == null || objects.isEmpty) return;
+    if (objects.isEmpty) return;
     var s = '';
     for (var i = 0; i < objects.length; i++) {
       var obj = objects.elementAt(i);
@@ -912,13 +487,12 @@ class _UTPSocket extends UTPSocket {
 
   @override
   void writeCharCode(int charCode) {
-    if (charCode == null) return;
     var s = String.fromCharCode(charCode);
     write(s);
   }
 
   @override
-  void writeln([Object obj = '']) {
+  void writeln([Object? obj = '']) {
     var str = obj?.toString();
     if (str == null || str.isEmpty) return;
     str = '$str\n';
@@ -927,8 +501,7 @@ class _UTPSocket extends UTPSocket {
 
   @override
   Future close([dynamic reason]) {
-    if (isClosed) return null;
-    connectionState = _UTPConnectState.CLOSING;
+    connectionState = UTPConnectState.CLOSING;
     _closeCompleter = Completer();
     Timer(Duration.zero, () => _requestSendData(null));
     // Timer.run(() => _requestSendData(null));
@@ -963,10 +536,10 @@ class _UTPSocket extends UTPSocket {
       _srtt = packetRtt.toDouble();
       _rttvar = packetRtt / 2;
     } else {
-      _rttvar = (1 - 0.25) * _rttvar + 0.25 * (_srtt - packetRtt).abs();
-      _srtt = (1 - 0.125) * _srtt + 0.125 * packetRtt;
+      _rttvar = (1 - 0.25) * _rttvar! + 0.25 * (_srtt! - packetRtt).abs();
+      _srtt = (1 - 0.125) * _srtt! + 0.125 * packetRtt;
     }
-    _rto = _srtt + max(100000, 4 * _rttvar);
+    _rto = _srtt! + max(100000, 4 * _rttvar!);
     // RFC6298规范中，如果RTO不到1秒，则设置为1秒，这里是给出的0.5秒
     _rto = max(_rto, 500000);
   }
@@ -974,7 +547,7 @@ class _UTPSocket extends UTPSocket {
   /// ACK某个[seq]对应的packet.
   ///
   /// 如果该Packet已经被acked，返回null，否则返回packet
-  UTPPacket _ackPacket(int seq) {
+  UTPPacket? _ackPacket(int seq) {
     var packet = _inflightPackets.remove(seq);
     var resend = _resendTimer.remove(seq);
     resend?.cancel();
@@ -986,7 +559,7 @@ class _UTPSocket extends UTPSocket {
       // 重发的packet不算
       if (rtt != 0 && packet.resend == 0) {
         minPacketRTT ??= rtt;
-        minPacketRTT = min(minPacketRTT, rtt);
+        minPacketRTT = min(minPacketRTT!, rtt);
       }
       return packet;
     }
@@ -1014,7 +587,7 @@ class _UTPSocket extends UTPSocket {
   int get currentDelay {
     if (_baseDelays.isEmpty) return 0;
     var sum = 0;
-    int _baseDiff;
+    int? _baseDiff;
     for (var i = 0; i < _baseDelays.length; i++) {
       var diff = _baseDelays[i][1];
       _baseDiff ??= diff;
@@ -1022,7 +595,7 @@ class _UTPSocket extends UTPSocket {
       sum += _baseDelays[i][1];
     }
     var avg = sum ~/ _baseDelays.length;
-    return avg - _baseDiff;
+    return avg - _baseDiff!;
   }
 
   /// 请查看[RFC6817](https://tools.ietf.org/html/rfc6817)以及BEP0029规范
@@ -1049,7 +622,7 @@ class _UTPSocket extends UTPSocket {
     var current_delay = currentDelay;
     if (current_delay == 0 || minPacketRTT == null) return;
     var our_delay =
-        min(minPacketRTT, current_delay); // delay会影响增加窗口的大小，这种获得的delay增加窗口会很激进
+        min(minPacketRTT!, current_delay); // delay会影响增加窗口的大小，这种获得的delay增加窗口会很激进
     // var our_delay = current_delay; // 这种方法会温和一些
     if (our_delay == 0) return;
     // print(
@@ -1087,7 +660,7 @@ class _UTPSocket extends UTPSocket {
   /// 然后该计数会重置， 丢包的数据会立即重发。
   ///
   void remoteAcked(int ackSeq, int currentDelay,
-      [bool isAckType = true, List<int> selectiveAck]) {
+      [bool isAckType = true, List<int>? selectiveAck]) {
     if (isClosed) return;
     if (!isConnected && !isClosing) return;
     if (ackSeq > currentLocalSeq || _inflightPackets.isEmpty) return;
@@ -1123,8 +696,8 @@ class _UTPSocket extends UTPSocket {
         if (_duplicateAckCountMap[key] == null) {
           _duplicateAckCountMap[key] = 1;
         } else {
-          _duplicateAckCountMap[key]++;
-          if (_duplicateAckCountMap[key] >= 3) {
+          _duplicateAckCountMap[key] = _duplicateAckCountMap[key]! + 1;
+          if (_duplicateAckCountMap[key]! >= 3) {
             _duplicateAckCountMap.remove(key);
             // print('$key 重复ack超过3($oldcount)次，计算丢包');
             var over = acked.length - i - 1;
@@ -1214,7 +787,7 @@ class _UTPSocket extends UTPSocket {
   void _startTimeoutCounter([int times = 0]) async {
     _rtoTimer?.cancel();
     if (_inflightPackets.isEmpty) return;
-    if (connectionState == _UTPConnectState.SYN_SENT) {
+    if (connectionState == UTPConnectState.SYN_SENT) {
       // 这里请查阅RFC6298第5节 5.7
       if (_rto < 3000000) _rto = 3000000;
     }
@@ -1226,7 +799,6 @@ class _UTPSocket extends UTPSocket {
             error: 'Send data timeout (${times + 1}/$MAX_TIMEOUT)',
             name: runtimeType.toString());
         addError('Send data timeout');
-        _closeCompleter ??= Completer();
         closeForce();
         await _closeCompleter.future;
         return;
@@ -1260,7 +832,7 @@ class _UTPSocket extends UTPSocket {
         payload: payload);
   }
 
-  SelectiveACK newSelectiveACK() {
+  SelectiveACK? newSelectiveACK() {
     if (_receivePacketBuffer.isEmpty) return null;
     _receivePacketBuffer.sort((a, b) {
       if (a > b) return 1;
@@ -1312,12 +884,12 @@ class _UTPSocket extends UTPSocket {
 
   /// 将数据包中的数据抛给监听器
   void _throwDataToListener(UTPPacket packet) {
-    if (packet.payload != null && packet.payload.isNotEmpty) {
+    if (packet.payload != null && packet.payload!.isNotEmpty) {
       if (packet.offset != 0) {
-        var data = packet.payload.sublist(packet.offset);
-        _receiveDataStreamController?.add(data);
+        var data = packet.payload!.sublist(packet.offset);
+        _receiveDataStreamController.add(Uint8List.fromList(data));
       } else {
-        _receiveDataStreamController?.add(packet.payload);
+        _receiveDataStreamController.add(Uint8List.fromList(packet.payload!));
       }
       packet.payload = null;
     }
@@ -1330,7 +902,7 @@ class _UTPSocket extends UTPSocket {
     var expectSeq = (lastRemoteSeq + 1) & MAX_UINT16;
     var seq = packet.seq_nr;
     if (_finalRemoteFINSeq != null) {
-      if (compareSeqLess(_finalRemoteFINSeq, seq)) {
+      if (compareSeqLess(_finalRemoteFINSeq!, seq)) {
         // dev.log('Over FIN seq：$seq($_finalRemoteFINSeq)');
         return;
       }
@@ -1400,13 +972,14 @@ class _UTPSocket extends UTPSocket {
   /// [save]表示是否保存到in-flighting packets map中，如果type是ST_STATE，则该值无论真假，都不会保存
   bool sendPacket(UTPPacket packet,
       [int times = 0, bool increase = true, bool save = true]) {
-    if (isClosed || _socket == null) return false;
+    if (isClosed) return false;
     var len = packet.length;
     _currentWindowSize += len;
     // 按照包被创建时间来计算
     _startTimeOffset ??= DateTime.now().microsecondsSinceEpoch;
-    var time = getNowTimestamp(_startTimeOffset);
-    var diff = (time - lastRemotePktTimestamp).abs() & MAX_UINT32;
+    var time = getNowTimestamp(_startTimeOffset!);
+    var diff = (time - lastRemotePktTimestamp!).abs() & MAX_UINT32;
+    // TODO:Remove null casting
     if (packet.type == ST_SYN) {
       diff = 0;
     }
@@ -1417,7 +990,7 @@ class _UTPSocket extends UTPSocket {
     if (save && packet.type != ST_STATE) {
       _inflightPackets[packet.seq_nr] = packet;
     }
-    int lastAck;
+    int? lastAck;
     if (packet.type == ST_DATA ||
         packet.type == ST_SYN ||
         packet.type == ST_FIN) {
@@ -1432,7 +1005,7 @@ class _UTPSocket extends UTPSocket {
       }
     }
     var bytes = packet.getBytes(ack: lastAck, time: time, timeDiff: diff);
-    var sendBytes = _socket?.send(bytes, remoteAddress, remotePort);
+    var sendBytes = socket.send(bytes, remoteAddress, remotePort);
     var success = sendBytes > 0;
     if (success) {
       // dev.log(
@@ -1476,11 +1049,11 @@ class _UTPSocket extends UTPSocket {
     });
   }
 
-  void _remoteFIN(int finalSeq) async {
+  void remoteFIN(int finalSeq) async {
     var expectFinal = (lastRemoteSeq + 1) & MAX_UINT32;
     if (compareSeqLess(expectFinal, finalSeq) || expectFinal == finalSeq) {
       _finalRemoteFINSeq = finalSeq;
-      connectionState = _UTPConnectState.CLOSING;
+      connectionState = UTPConnectState.CLOSING;
     }
   }
 
@@ -1489,7 +1062,7 @@ class _UTPSocket extends UTPSocket {
   /// 不发送FIN给remote，直接关闭socket
   void closeForce() async {
     if (isClosed) return;
-    connectionState = _UTPConnectState.CLOSED;
+    connectionState = UTPConnectState.CLOSED;
     _closed = true;
 
     _FINTimer?.cancel();
@@ -1503,16 +1076,16 @@ class _UTPSocket extends UTPSocket {
 
     _inflightPackets.clear();
     _resendTimer.forEach((key, timer) {
-      timer?.cancel();
+      timer.cancel();
     });
     _resendTimer.clear();
 
     _requestSendAckMap.forEach((key, timer) {
-      timer?.cancel();
+      timer.cancel();
     });
     _requestSendAckMap.clear();
 
-    _sendingDataBuffer?.clear();
+    _sendingDataBuffer.clear();
     _keepAliveTimer?.cancel();
 
     _baseDelays.clear();
@@ -1521,190 +1094,13 @@ class _UTPSocket extends UTPSocket {
     Timer.run(() {
       _handler?.socketClosed(this);
       _handler = null;
-      if (_closeCompleter != null && !_closeCompleter.isCompleted) {
+      if (!_closeCompleter.isCompleted) {
         _closeCompleter.complete();
-        _closeCompleter = null;
       }
     });
     _finSended = false;
-    await _receiveDataStreamController?.close();
-    _receiveDataStreamController = null;
+    await _receiveDataStreamController.close();
 
     return;
-  }
-}
-
-///
-/// uTP protocol receive data process
-///
-/// Include init connection and other type data process , both of Server socket and client socket
-void _processReceiveData(
-    RawDatagramSocket rawSocket,
-    InternetAddress remoteAddress,
-    int remotePort,
-    UTPPacket packetData,
-    _UTPSocket socket,
-    {void Function(_UTPSocket socket) onConnected,
-    void Function(_UTPSocket socket) newSocket,
-    void Function(_UTPSocket socket, dynamic error) onError}) {
-  // print(
-  //     '收到对方${TYPE_NAME[packetData.type]}包:seq_nr:${packetData.seq_nr} , ack_nr : ${packetData.ack_nr}');
-  // if (packetData.dataExtension != null) print('有Extension');
-  if (socket != null && socket.isClosed) return;
-  // dev.log(
-  //     'Receive(${_Type2Map[packetData.type]}) : seq : ${packetData.seq_nr} , ack : ${packetData.ack_nr}',
-  //     name: 'utp_protocol_impelement');
-  switch (packetData.type) {
-    case ST_SYN:
-      _processSYNMessage(
-          socket, rawSocket, remoteAddress, remotePort, packetData, newSocket);
-      break;
-    case ST_DATA:
-      _processDataMessage(socket, packetData, onConnected, onError);
-      break;
-    case ST_STATE:
-      _processStateMessage(socket, packetData, onConnected, onError);
-      break;
-    case ST_FIN:
-      _processFINMessage(socket, packetData);
-      break;
-    case ST_RESET:
-      _processResetMessage(socket);
-      break;
-  }
-}
-
-/// 处理Reset消息。
-///
-/// Socket接收到此消息后强行关闭连接
-void _processResetMessage(_UTPSocket socket) {
-  // socket?.addError('Reset by remote');
-  socket?.closeForce();
-}
-
-/// 处理FIN消息
-void _processFINMessage(_UTPSocket socket, UTPPacket packetData) async {
-  if (socket == null || socket.isClosed || socket.isClosing) return;
-  socket._remoteFIN(packetData.seq_nr);
-  socket.lastRemotePktTimestamp = packetData.sendTime;
-  socket.remoteWndSize = packetData.wnd_size;
-  socket.addReceivePacket(packetData);
-  socket.remoteAcked(packetData.ack_nr, packetData.timestampDifference, false);
-}
-
-/// 处理进来的SYN消息
-///
-/// 每次收到SYN消息，都要新建一个连接。但是如果该连接ID已经有对应的[socket]，那就应该通知对方Reset
-void _processSYNMessage(_UTPSocket socket, RawDatagramSocket rawSocket,
-    InternetAddress remoteAddress, int remotePort, UTPPacket packetData,
-    [void Function(_UTPSocket socket) newSocket]) {
-  if (socket != null) {
-    _sendResetMessage(
-        packetData.connectionId, rawSocket, remoteAddress, remotePort);
-    // dev.log(
-    //     'Duplicated connection id or error data type , reset the connection',
-    //     name: 'utp_protocol_implement');
-    return;
-  }
-  var connId = (packetData.connectionId + 1) & MAX_UINT16;
-  socket = _UTPSocket(rawSocket, remoteAddress, remotePort);
-  // init receive_id and sent_id
-  socket.receiveId = connId;
-  socket.sendId = packetData.connectionId; // 保证发送的conn id一致
-  socket.currentLocalSeq = Random().nextInt(MAX_UINT16); // 随机seq
-  socket.connectionState = _UTPConnectState.SYN_RECV; // 更改连接状态
-  socket.lastRemoteSeq = packetData.seq_nr;
-  socket.remoteWndSize = packetData.wnd_size;
-  socket.lastRemotePktTimestamp = packetData.sendTime;
-  var packet = socket.newAckPacket();
-  socket.sendPacket(packet, 0, false, false);
-  if (newSocket != null) newSocket(socket);
-  return;
-}
-
-/// 通过UDP套接字直接发送一个RESET类型消息给对方
-Future _sendResetMessage(int connId, RawDatagramSocket rawSocket,
-    InternetAddress remoteAddress, int remotePort,
-    [UTPPacket packet, Completer completer]) {
-  if (rawSocket == null) return Future.value();
-  packet ??= UTPPacket(ST_RESET, connId, 0, 0, 0, 1, 0);
-  var bytes = packet.getBytes();
-  completer ??= Completer();
-  var s = rawSocket.send(bytes, remoteAddress, remotePort);
-  if (s > 0) {
-    completer.complete();
-    return completer.future;
-  } else {
-    Timer.run(() => _sendResetMessage(
-        connId, rawSocket, remoteAddress, remotePort, packet, completer));
-  }
-  return completer.future;
-}
-
-/// 将packet数据中的SelectiveAck Extension带的ack序列号读出
-List<int> _readSelectiveAcks(UTPPacket packetData) {
-  List<int> selectiveAcks;
-  if (packetData.extensionList.isNotEmpty) {
-    selectiveAcks = <int>[];
-    packetData.extensionList.forEach((ext) {
-      if (ext.isUnKnownExtension) return;
-      var s = ext as SelectiveACK;
-      selectiveAcks.addAll(s.getAckeds());
-    });
-  }
-  return selectiveAcks;
-}
-
-/// 处理进来的Data消息
-///
-/// 对于处于SYN_RECV的socket来说，此时收到消息如果序列号正确，那就是真正连接成功
-void _processDataMessage(_UTPSocket socket, UTPPacket packetData,
-    [void Function(_UTPSocket) onConnected,
-    void Function(_UTPSocket source, dynamic error) onError]) {
-  if (socket == null) {
-    return;
-  }
-  var selectiveAcks = _readSelectiveAcks(packetData);
-  if (socket.connectionState == _UTPConnectState.SYN_RECV &&
-      (socket.currentLocalSeq - 1) & MAX_UINT16 == packetData.ack_nr) {
-    socket.connectionState = _UTPConnectState.CONNECTED;
-    socket.startKeepAlive();
-    socket.remoteWndSize = packetData.wnd_size;
-    if (onConnected != null) onConnected(socket);
-  }
-  // 已连接状态下收到数据后去掉header，把payload以事件发出
-  if (socket.isConnected || socket.isClosing) {
-    socket.remoteWndSize = packetData.wnd_size; // 更新对方的window size
-    socket.lastRemotePktTimestamp = packetData.sendTime;
-    socket.addReceivePacket(packetData);
-    socket.remoteAcked(packetData.ack_nr, packetData.timestampDifference, false,
-        selectiveAcks);
-
-    return;
-  }
-}
-
-/// 处理Ack消息
-///
-/// 如果[socket]处于SYN_SENT状态，那么此时如果序列号正确即表示连接成功
-void _processStateMessage(_UTPSocket socket, UTPPacket packetData,
-    [void Function(_UTPSocket) onConnected,
-    void Function(_UTPSocket source, dynamic error) onError]) {
-  if (socket == null) return;
-  var selectiveAcks = _readSelectiveAcks(packetData);
-  if (socket.connectionState == _UTPConnectState.SYN_SENT &&
-      (socket.currentLocalSeq - 1) & MAX_UINT16 == packetData.ack_nr) {
-    socket.connectionState = _UTPConnectState.CONNECTED;
-    socket.lastRemoteSeq = packetData.seq_nr;
-    socket.lastRemoteSeq--;
-    socket.remoteWndSize = packetData.wnd_size;
-    socket.startKeepAlive();
-    if (onConnected != null) onConnected(socket);
-  }
-  if (socket.isConnected || socket.isClosing) {
-    socket.remoteWndSize = packetData.wnd_size; // 更新对方的window size
-    socket.lastRemotePktTimestamp = packetData.sendTime;
-    socket.remoteAcked(
-        packetData.ack_nr, packetData.timestampDifference, true, selectiveAcks);
   }
 }
