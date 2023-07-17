@@ -24,7 +24,7 @@ void main() async {
       var result = utf8.decode(receive);
       var totalSize = receive.length / 1024;
       receive.clear();
-      print('$result');
+      print(result);
       await ss.close();
       print(
           '[Server] Remote ${socket.remoteAddress.address}:${socket.remotePort}[${socket.connectionId}] closed,so close server too');

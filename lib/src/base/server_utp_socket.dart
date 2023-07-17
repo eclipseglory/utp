@@ -20,7 +20,7 @@ abstract class ServerUTPSocket extends UTPCloseHandler {
       {Function onError, void Function() onDone, bool cancelOnError});
 
   static Future<ServerUTPSocketImpl> bind(dynamic host, [int port = 0]) async {
-    var _socket = await RawDatagramSocket.bind(host, port);
-    return ServerUTPSocketImpl(_socket);
+    var socket = await RawDatagramSocket.bind(host, port);
+    return ServerUTPSocketImpl(socket);
   }
 }

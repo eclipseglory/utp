@@ -120,11 +120,11 @@ List<int> _readSelectiveAcks(UTPPacket packetData) {
   var selectiveAcks = <int>[];
   if (packetData.extensionList.isNotEmpty) {
     selectiveAcks = <int>[];
-    packetData.extensionList.forEach((ext) {
-      if (ext.isUnKnownExtension) return;
+    for (var ext in packetData.extensionList) {
+      if (ext.isUnKnownExtension) continue;
       var s = ext as SelectiveACK;
       selectiveAcks.addAll(s.getAckeds());
-    });
+    }
   }
   return selectiveAcks;
 }
@@ -170,9 +170,7 @@ void processStateMessage(UTPSocketImpl? socket, UTPPacket packetData,
       (socket.currentLocalSeq - 1) & MAX_UINT16 == packetData.ack_nr) {
     socket.connectionState = UTPConnectState.CONNECTED;
     socket.lastRemoteSeq = packetData.seq_nr;
-    if (socket.lastRemoteSeq != null) {
-      socket.lastRemoteSeq = socket.lastRemoteSeq - 1;
-    }
+    socket.lastRemoteSeq = socket.lastRemoteSeq - 1;
 
     socket.remoteWndSize = packetData.wnd_size;
     socket.startKeepAlive();

@@ -587,15 +587,15 @@ class UTPSocketImpl extends UTPSocket {
   int get currentDelay {
     if (_baseDelays.isEmpty) return 0;
     var sum = 0;
-    int? _baseDiff;
+    int? baseDiff;
     for (var i = 0; i < _baseDelays.length; i++) {
       var diff = _baseDelays[i][1];
-      _baseDiff ??= diff;
-      _baseDiff = min(_baseDiff, diff);
+      baseDiff ??= diff;
+      baseDiff = min(baseDiff, diff);
       sum += _baseDelays[i][1];
     }
     var avg = sum ~/ _baseDelays.length;
-    return avg - _baseDiff!;
+    return avg - baseDiff!;
   }
 
   /// 请查看[RFC6817](https://tools.ietf.org/html/rfc6817)以及BEP0029规范
@@ -730,9 +730,9 @@ class UTPSocketImpl extends UTPSocket {
         }
       }
       hasLost = lostPackets.isNotEmpty;
-      lostPackets.forEach((seq) {
+      for (var seq in lostPackets) {
         _resendPacket(seq);
-      });
+      }
     }
 
     var sended = _inflightPackets.keys;
@@ -755,15 +755,15 @@ class UTPSocketImpl extends UTPSocket {
     if (_inflightPackets.isEmpty && _duplicateAckCountMap.isNotEmpty) {
       _duplicateAckCountMap.clear();
     } else {
-      var _useless = <int>[];
-      _duplicateAckCountMap.keys.forEach((element) {
+      var useless = <int>[];
+      for (var element in _duplicateAckCountMap.keys) {
         if (compareSeqLess(element, ackSeq)) {
-          _useless.add(element);
+          useless.add(element);
         }
-      });
-      _useless.forEach((element) {
+      }
+      for (var element in useless) {
         _duplicateAckCountMap.remove(element);
-      });
+      }
     }
     if (_finSended && _inflightPackets.isEmpty) {
       // 如果已经发送FIN并且发送队列中的所有packet已经被ack
@@ -811,12 +811,12 @@ class UTPSocketImpl extends UTPSocket {
       // print('更改packet size: $_packetSize , max window : $_allowWindowSize');
       times++;
       var now = getNowTimestamp(_startTimeOffset);
-      _inflightPackets.values.forEach((packet) {
+      for (var packet in _inflightPackets.values) {
         var passed = now - packet.sendTime;
         if (passed >= _rto) {
           _resendPacket(packet.seq_nr, times);
         }
-      });
+      }
       _rto *= 2; // 超时时间翻倍
     });
   }
@@ -845,9 +845,9 @@ class UTPSocketImpl extends UTPSocket {
     if (r != 0) c++;
     var payload = List<int>.filled(c * 32, 0);
     var selectiveAck = SelectiveACK(lastRemoteSeq, payload.length, payload);
-    _receivePacketBuffer.forEach((packet) {
+    for (var packet in _receivePacketBuffer) {
       selectiveAck.setAcked(packet.seq_nr);
-    });
+    }
     return selectiveAck;
   }
 

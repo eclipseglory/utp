@@ -159,9 +159,9 @@ class UTPPacket {
   int get hashCode => seq_nr.toString().hashCode;
 
   @override
-  bool operator ==(b) {
-    if (b is UTPPacket) {
-      return b.seq_nr == seq_nr;
+  bool operator ==(other) {
+    if (other is UTPPacket) {
+      return other.seq_nr == seq_nr;
     }
     return false;
   }

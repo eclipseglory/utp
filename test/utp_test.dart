@@ -108,9 +108,9 @@ void main() {
     if (r != 0) c++;
     var payload = List<int>.filled(c * 32, 0);
     var selectiveAck = SelectiveACK(lastRemoteSeq, payload.length, payload);
-    buffer.forEach((seq) {
+    for (var seq in buffer) {
       selectiveAck.setAcked(seq);
-    });
+    }
     var ackes = selectiveAck.getAckeds();
     for (var i = 0; i < ackes.length; i++) {
       assert(ackes[i] == buffer[i]);
