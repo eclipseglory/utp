@@ -10,7 +10,7 @@ abstract class UTPSocket extends Socket {
   /// Is UTP socket connected to remote
   bool get isConnected;
 
-  /// 这是用于通讯的真正的UDP socket
+  /// This is the real UDP socket used for communication
   final RawDatagramSocket socket;
 
   /// The connection id between this socket with remote socket

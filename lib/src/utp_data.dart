@@ -268,7 +268,7 @@ Uint8List _createData(int type, int connectionId, int timestamp,
   if (extensions == null || extensions.isEmpty) {
     bytes = Uint8List(20 + payloadLen);
     view = ByteData.view(bytes.buffer);
-    view.setUint8(1, 0); // 没有extension
+    view.setUint8(1, 0); // No extension included
   } else {
     var extlen = extensions.fold(
         0, (int previousValue, element) => previousValue + element.length + 2);

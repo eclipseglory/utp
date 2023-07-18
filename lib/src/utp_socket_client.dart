@@ -20,7 +20,7 @@ import 'base/utp_close_handler.dart';
 class UTPSocketClient extends UTPCloseHandler with UTPSocketRecorder {
   bool _closed = false;
 
-  /// 是否已被销毁
+  /// Has it been destroyed
   bool get isClosed => _closed;
 
   /// Each UDP socket can handler max connections
@@ -62,13 +62,16 @@ class UTPSocketClient extends UTPCloseHandler with UTPSocketRecorder {
     var completer = Completer<UTPSocket>();
     _connectingSocketMap[connId] = completer;
 
-    utp.connectionState = UTPConnectState.SYN_SENT; //修改socket连接状态
-    // 初始化send_id 和_receive_id
-    utp.receiveId = connId; //初始一个随机的connection id
+    utp.connectionState =
+        UTPConnectState.SYN_SENT; // Modify the socket connection state.
+    // Initialize send_id and _receive_id.
+    utp.receiveId = connId; // Initialize a random connection ID.
     utp.sendId = (utp.receiveId ?? 0 + 1) & MAX_UINT16;
-    utp.sendId &= MAX_UINT16; // 防止溢出
-    utp.currentLocalSeq = Random().nextInt(MAX_UINT16); // 随机一个seq;
-    utp.lastRemoteSeq = 0; // 这个设为0，起始是没有得到远程seq的
+    utp.sendId &= MAX_UINT16; // Avoid overflow
+    utp.currentLocalSeq = Random()
+        .nextInt(MAX_UINT16); // Generate a random sequence number (seq).
+    utp.lastRemoteSeq =
+        0; // This is set to 0, the remote seq is not obtained at the beginning
     utp.lastRemotePktTimestamp = 0;
     utp.closeHandler = this;
     var packet = UTPPacket(ST_SYN, connId, 0, 0, utp.maxWindowSize,

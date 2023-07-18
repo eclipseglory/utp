@@ -31,7 +31,7 @@ class UTPSocketImpl extends UTPSocket {
 
   double? _rttvar;
 
-  /// 超时时间，单位微妙
+  /// Timeout duration in microseconds.
   double _rto = 1000000.0;
 
   // double _rtt = 0.0;
@@ -92,13 +92,13 @@ class UTPSocketImpl extends UTPSocket {
 
   final List<List<int>> _baseDelays = <List<int>>[];
 
-  /// 发送FIN消息并关闭socket的一个future控制completer
+  /// Sending FIN message and closing the socket with a future controlling the completer.
   Completer _closeCompleter = Completer();
 
   @override
   bool get isClosed => _closed;
 
-  /// 正在关闭
+  /// closing
   bool get isClosing => connectionState == UTPConnectState.CLOSING;
 
   final StreamController<Uint8List> _receiveDataStreamController =
@@ -148,9 +148,9 @@ class UTPSocketImpl extends UTPSocket {
     return true;
   }
 
-  /// socket每次连接成功后或者发送/接收任何消息（keepalive消息除外），都会定义一个延时30秒的Timer。
+  /// After each successful connection or sending/receiving any message (excluding keepalive messages), the socket will define a Timer with a delay of 30 seconds.
   ///
-  /// Timer触发就会发送一次ST_STATE 消息，seq_nr为下一次发送seq，ack_nr为最后一次收到的远程seq-1
+  /// When the Timer triggers, it will send an ST_STATE message, where seq_nr is set to the next sequence number to be sent, and ack_nr is set to the last received remote sequence number minus 1.
   void startKeepAlive() {
     _keepAliveTimer?.cancel();
     _keepAliveTimer = Timer(Duration(seconds: 30), () {
@@ -162,15 +162,14 @@ class UTPSocketImpl extends UTPSocket {
     });
   }
 
-  /// 发送数据会通过该方法进入
+  /// Data transmission will go through this method.
   ///
-  /// 当发送数据buffer没有数据，并且[_closeCompleter]不为空，则会发送FIN消息给对方
-  ///
+  /// When the sending data buffer is empty and [_closeCompleter] is not null, a FIN message will be sent to the other party.
   void _requestSendData([List<int>? data]) {
     if (data != null && data.isNotEmpty) _sendingDataBuffer.addAll(data);
     if (_sendingDataBuffer.isEmpty) {
       if (!_closeCompleter.isCompleted && _sendingDataCache.isEmpty) {
-        // 这说明此时可以发送FIN消息
+        //This means that the FIN message can be sent at this time
         _sendFIN();
       }
       return;
@@ -508,18 +507,18 @@ class UTPSocketImpl extends UTPSocket {
     return _closeCompleter.future;
   }
 
-  /// 重发某个Packet
+  /// Resend a Packet
   ///
-  /// [seq] 是packet的序列号
+  /// [seq] is the sequence number of the packet
   ///
-  /// [times]是重发次数
+  /// [times] is the number of retransmissions
   void _resendPacket(int seq, [int times = 0]) {
     var packet = _inflightPackets[seq];
     if (packet == null) return _resendTimer.remove(seq)?.cancel();
 
     _resendTimer.remove(seq)?.cancel();
     _resendTimer[seq] = Timer(Duration.zero, () {
-      // print('重新发送 $seq');
+      // print('Resend $seq');
       _currentWindowSize -= packet.length;
       packet.resend++;
       _resendTimer.remove(seq);
@@ -527,9 +526,9 @@ class UTPSocketImpl extends UTPSocket {
     });
   }
 
-  /// 更新超时时间
+  /// update timeout
   ///
-  /// 该计算公式请查阅BEP0029规范以及[RFC6298](https://tools.ietf.org/html/rfc6298)
+  /// For the calculation formula, please refer to the BEP0029 specification and[RFC6298](https://tools.ietf.org/html/rfc6298)
   void _caculateRTO(UTPPacket packet) {
     var packetRtt = getNowTimestamp(_startTimeOffset) - packet.sendTime;
     if (_srtt == null) {
@@ -540,13 +539,13 @@ class UTPSocketImpl extends UTPSocket {
       _srtt = (1 - 0.125) * _srtt! + 0.125 * packetRtt;
     }
     _rto = _srtt! + max(100000, 4 * _rttvar!);
-    // RFC6298规范中，如果RTO不到1秒，则设置为1秒，这里是给出的0.5秒
+    // In RFC 6298, if the calculated RTO (Retransmission TimeOut) value is less than 1 second, it should be set to 1 second. However, in this context, it has been specified as 0.5 seconds.
     _rto = max(_rto, 500000);
   }
 
-  /// ACK某个[seq]对应的packet.
+  /// ACK the packet corresponding to a certain [seq].
   ///
-  /// 如果该Packet已经被acked，返回null，否则返回packet
+  /// If the Packet has been acked, return null, otherwise return packet
   UTPPacket? _ackPacket(int seq) {
     var packet = _inflightPackets.remove(seq);
     var resend = _resendTimer.remove(seq);
@@ -556,7 +555,7 @@ class UTPSocketImpl extends UTPSocket {
       _currentWindowSize -= ackedSize;
       var now = getNowTimestamp(_startTimeOffset);
       var rtt = now - packet.sendTime;
-      // 重发的packet不算
+      // Retransmitted packets do not count
       if (rtt != 0 && packet.resend == 0) {
         minPacketRTT ??= rtt;
         minPacketRTT = min(minPacketRTT!, rtt);
@@ -566,9 +565,9 @@ class UTPSocketImpl extends UTPSocket {
     return null;
   }
 
-  /// 更新base delay
+  /// update base delay
   ///
-  /// 只保存5秒内的delay
+  /// Only delays within a 5-second interval are saved.
   void _updateBaseDelay(int delay) {
     if (delay <= 0) return;
     var now = DateTime.now().millisecondsSinceEpoch;
@@ -581,9 +580,9 @@ class UTPSocketImpl extends UTPSocket {
     }
   }
 
-  /// 获得当前Delay
+  /// Get the current Delay
   ///
-  /// 计算规则：当前basedelay的平均值减去当前basedelay中的最小值
+  /// Calculation rules: the average value of the current basedelay minus the minimum value in the current basedelay
   int get currentDelay {
     if (_baseDelays.isEmpty) return 0;
     var sum = 0;
@@ -598,7 +597,7 @@ class UTPSocketImpl extends UTPSocket {
     return avg - baseDiff!;
   }
 
-  /// 请查看[RFC6817](https://tools.ietf.org/html/rfc6817)以及BEP0029规范
+  /// Please see [RFC6817](https://tools.ietf.org/html/rfc6817) and the BEP0029 specification
   void _ledbatControl(int ackedSize, int delay) {
     if (ackedSize <= 0 || _allowWindowSize == 0) return;
     // int minBaseDelay;
@@ -607,11 +606,16 @@ class UTPSocketImpl extends UTPSocket {
     //   minBaseDelay = min(minBaseDelay, element[1]);
     // });
     // if (minBaseDelay == null) return;
-    // 这是原规范中提到的算法，和下面的算法是一致的。
-    // 不同的是，1.UTP允许cwnd为0，这样就发不出数据，然后会在超时的时候将cwnd设为最小窗口
-    // 2. currnetDelay不同，规范中提出，currentDelay可以利用很多种方法过滤获得，不过滤也
-    // 是其中一种过滤。我在实现的时候采用的是利用5秒中内的delay的平均值,以及最小packet rtt两者
-    // 的最小值，这是参考了libutp的代码，但具体对不对我也不知道。
+    // This is the algorithm mentioned in the original specification, which is
+    // consistent with the algorithm below. The differences are as follows:
+    // 1. UTP allows cwnd (congestion window) to be 0, so no data can be sent,
+    //and then cwnd will be set to the minimum window size when a timeout occurs.
+    // 2. The currentDelay is different; the specification proposes that
+    // currentDelay can be obtained using various methods, and filtering is one
+    //  of them. In my implementation, I used the average of delays within 5
+    //  seconds and the minimum packet round-trip time as the currentDelay,
+    //  which was referenced from the libutp code, but I'm not certain if it is
+    //  correct or not
     // var queuing_delay = delay - minBaseDelay;
     // var off_target = (CCONTROL_TARGET - queuing_delay) / CCONTROL_TARGET;
     // cwnd += MAX_CWND_INCREASE_PACKETS_PER_RTT * off_target * ackedSize ~/ cwnd;
@@ -621,9 +625,9 @@ class UTPSocketImpl extends UTPSocket {
 
     var current_delay = currentDelay;
     if (current_delay == 0 || minPacketRTT == null) return;
-    var our_delay =
-        min(minPacketRTT!, current_delay); // delay会影响增加窗口的大小，这种获得的delay增加窗口会很激进
-    // var our_delay = current_delay; // 这种方法会温和一些
+    var our_delay = min(minPacketRTT!,
+        current_delay); // The delay will affect the increase in the window size, and obtaining delay in this way can lead to an aggressive increase in the window size.
+    // var our_delay = current_delay; // This method will be more moderate.
     if (our_delay == 0) return;
     // print(
     //     'rtt : $minPacketRTT ,our delay : $queuing_delay , current delay: $current_delay');
@@ -642,23 +646,17 @@ class UTPSocketImpl extends UTPSocket {
   }
 
   ///
+  /// This method implements the [BEP0029 protocol specification](http://www.bittorrent.org/beps/bep_0029.html) with some modifications.
+  /// After the other party acknowledges receiving a data packet with a specific sequence number (applicable for both STATE and DATA types), the method compares this [ackSeq] with the packets that have already been sent. If [ackSeq] is within the confirmation range, i.e., <= seq_nr and >= last_seq_nr, it is considered valid.
   ///
-  /// 该方法根据[BEP0029 协议规范](http://www.bittorrent.org/beps/bep_0029.html)实现，但做出了改动。
+  /// For valid [ackSeq], the method checks the sending queue and clears all packets with a sequence number less than or equal to [ackSeq] (since the other party has confirmed receiving them).
   ///
-  /// 每次对方确认收到某序列号的数据包后（对于STATE和DATA类型都适用）， 会根据该序列号和已经发送的包进行比较。 如果此[ackSeq]是在确认范围内，
-  /// 即 <= seq_nr ，且 >= last_seq_nr，则认为该[ackSeq]有效。
+  /// If [ackSeq] is received multiple times or if the sequence numbers in [selectiveAck] are repeated, and the [isAckType] value is `true`, the method will count the repetitions (only for STATE type's ack_nr). If a sequence number is repeated more than 3 times:
   ///
-  /// 对于有效[ackSeq]，会查看发送队列中的数据包，并清除所有小于等于该[ackSeq]的数据包(因为对方已经表示确认收到了)。
-  ///
-  /// 重复收到[ackSeq]，或者[selectiveAck]中的序列号重复收到，当[isAckType]值为`true`的时候会进行计数(仅对STATE类型的ack_nr进行计数)，
-  /// 当某seq重复次数超过3次：
-  ///
-  /// - 如果该序列号往前的包已经有超过3个被确认收到(*如果该序列号是最后几个发送的，那它的前几个可能不会有3个，则会降低该阈值*)，
-  /// 则该序列号和它往前以及往后最近的已确认收到的序列号中间所有的包会被认为已经丢包。
-  /// - 如果没有发生上述的情况，则认为该确认[ackSeq] + 1丢包。
-  ///
-  /// 然后该计数会重置， 丢包的数据会立即重发。
-  ///
+  ///   - If there are more than 3 packets confirmed as received before this sequence number (*if this sequence number is among the last few sent, its earlier packets may not reach 3 confirmations*), then all packets between this sequence number and the closest confirmed received sequence numbers before and after it will be considered lost.
+  ///   - If the above condition is not met, it is assumed that the sequence number [ackSeq] + 1 is lost.
+
+// The count is then reset, and the lost packets are immediately retransmitted.
   void remoteAcked(int ackSeq, int currentDelay,
       [bool isAckType = true, List<int>? selectiveAck]) {
     if (isClosed) return;
@@ -699,7 +697,7 @@ class UTPSocketImpl extends UTPSocket {
           _duplicateAckCountMap[key] = _duplicateAckCountMap[key]! + 1;
           if (_duplicateAckCountMap[key]! >= 3) {
             _duplicateAckCountMap.remove(key);
-            // print('$key 重复ack超过3($oldcount)次，计算丢包');
+            // print('$key repeated ack exceeded 3($oldcount) times, calculating packet loss')
             var over = acked.length - i - 1;
             var limit = ((currentLocalSeq - 1 - key) & MAX_UINT16);
             limit = min(3, limit);
@@ -707,15 +705,15 @@ class UTPSocketImpl extends UTPSocket {
               var nextIndex = i + 1;
               var preIndex = i - 1;
               if (nextIndex < acked.length) {
-                var c =
-                    ((acked[nextIndex] - key) & MAX_UINT16) - 1; // 两个Ack中间有几个
+                var c = ((acked[nextIndex] - key) & MAX_UINT16) -
+                    1; // how many packets between two Acks.
                 for (var j = 0; j < c; j++) {
                   lostPackets.add((key + j + 1) & MAX_UINT16);
                 }
               }
               if (preIndex >= 0) {
-                var c =
-                    ((key - acked[preIndex]) & MAX_UINT16) - 1; // 两个Ack中间有几个
+                var c = ((key - acked[preIndex]) & MAX_UINT16) -
+                    1; // how many packets between two Acks.
                 for (var j = 0; j < c; j++) {
                   lostPackets.add((acked[preIndex] + j + 1) & MAX_UINT16);
                 }
@@ -766,8 +764,8 @@ class UTPSocketImpl extends UTPSocket {
       }
     }
     if (_finSended && _inflightPackets.isEmpty) {
-      // 如果已经发送FIN并且发送队列中的所有packet已经被ack
-      // 则认为对方已经全部收到，关闭该socket
+      // If FIN has been sent and all packets in the sending queue have been ACKed,
+      // then it is assumed that the other party has received everything and the socket is closed.
       closeForce();
       return;
     }
@@ -776,19 +774,19 @@ class UTPSocketImpl extends UTPSocket {
     Timer.run(() => _requestSendData());
   }
 
-  /// 启动一个超时定时器
+  ///Start a timeout timer
   ///
-  /// 每发生一次超时，超时限定时间会翻倍，并且maxWindowSize会设置为min packet size，即150个字节
+  ///Every time a timeout occurs, the timeout limit will be doubled, and maxWindowSize will be set to min packet size, which is 150 bytes
   ///
-  /// [times] 超时次数。如果每次正常发送数据，则这个值是0。如果是在超时回调
-  /// 中发送数据，这个值会自增。
+  ///[times] is the number of timeouts. If data is sent normally every time, this value is 0. If it is in the timeout callback
+  ///this value will increase automatically.
   ///
-  /// 每次超时，socket会重新发送队列中的packet。当超时次数超过5次时，则认为对方挂了，socket会自行断开
+  // Each timeout, the socket will resend the packets in the queue. If the number of timeouts exceeds 5 times, it is considered that the other party has disconnected, and the socket will disconnect itself
   void _startTimeoutCounter([int times = 0]) async {
     _rtoTimer?.cancel();
     if (_inflightPackets.isEmpty) return;
     if (connectionState == UTPConnectState.SYN_SENT) {
-      // 这里请查阅RFC6298第5节 5.7
+      // Please refer to Section 5.7 of RFC6298 here
       if (_rto < 3000000) _rto = 3000000;
     }
     _rtoTimer = Timer(Duration(microseconds: _rto.floor()), () async {
@@ -808,7 +806,7 @@ class UTPSocketImpl extends UTPSocket {
       //     name: runtimeType.toString());
       _allowWindowSize = MIN_PACKET_SIZE;
       _packetSize = MIN_PACKET_SIZE;
-      // print('更改packet size: $_packetSize , max window : $_allowWindowSize');
+      // print('Modifying packet size: $_packetSize , max window : $_allowWindowSize');
       times++;
       var now = getNowTimestamp(_startTimeOffset);
       for (var packet in _inflightPackets.values) {
@@ -817,7 +815,7 @@ class UTPSocketImpl extends UTPSocket {
           _resendPacket(packet.seq_nr, times);
         }
       }
-      _rto *= 2; // 超时时间翻倍
+      _rto *= 2; // double the timeout
     });
   }
 
@@ -851,10 +849,9 @@ class UTPSocketImpl extends UTPSocket {
     return selectiveAck;
   }
 
-  /// 请求发送ACK到远程端
+  // Request to send an ACK to the remote end.
   ///
-  /// 请求会压入事件队列中，如果在触发之前有新的ACK要发出，且该ACK不小于要发送的ACK，
-  /// 则会取消该次发送，用最新的ACK替代
+  /// The request will be pushed into the event queue. If a new ACK needs to be sent before the trigger, and that ACK is not smaller than the ACK to be sent, the current sending will be canceled, and the latest ACK will be used instead.
   void requestSendAck() {
     if (isClosed) return;
     if (!isConnected && !isClosing) return;
@@ -876,13 +873,13 @@ class UTPSocketImpl extends UTPSocket {
       _requestSendAckMap.remove(ack);
       if (!sendPacket(packet, 0, false, false) &&
           packet.ack_nr == _finalRemoteFINSeq) {
-        // 发送失败除非是最后的FIN，否则没必要持续重发
+        // Re-sending is unnecessary for failed messages, unless it's the last FIN message
         Timer.run(() => requestSendAck());
       }
     });
   }
 
-  /// 将数据包中的数据抛给监听器
+  /// Pass the data from the data packet to the listener.
   void _throwDataToListener(UTPPacket packet) {
     if (packet.payload != null && packet.payload!.isNotEmpty) {
       if (packet.offset != 0) {
@@ -895,9 +892,9 @@ class UTPSocketImpl extends UTPSocket {
     }
   }
 
-  /// 处理接收到的[packet]
+  /// Handling the received [packet].
   ///
-  /// 这都是处理远程发送的ST_DATA消息
+  /// These are all the ST_DATA messages received from the remote.
   void addReceivePacket(UTPPacket packet) {
     var expectSeq = (lastRemoteSeq + 1) & MAX_UINT16;
     var seq = packet.seq_nr;
@@ -917,7 +914,7 @@ class UTPSocketImpl extends UTPSocket {
       _receivePacketBuffer.add(packet);
     }
     if (seq == expectSeq) {
-      // 这是期待的正确顺序包
+      // This is the expected correct sequence of packets.
       lastRemoteSeq = expectSeq;
       if (_receivePacketBuffer.isEmpty) {
         _throwDataToListener(packet);
@@ -940,10 +937,10 @@ class UTPSocketImpl extends UTPSocket {
     }
     if (isClosing) {
       if (lastRemoteSeq == _finalRemoteFINSeq) {
-        // 如果是最后一个数据包，那就关闭该socket
+        // If it is the last data packet, then close the socket
         var packet = newAckPacket();
         var s = sendPacket(packet, 0, false, false);
-        // 如果没发出去，疯狂重发
+        // If the data has not been sent, it will be continuously retransmitted
         while (!s) {
           s = sendPacket(packet, 0, false, false);
         }
@@ -951,31 +948,30 @@ class UTPSocketImpl extends UTPSocket {
         closeForce();
         return;
       } else {
-        //每次收到新数据都会重置FIN倒计时
+        //Every time new data is received, the FIN countdown will be reset.
         _startCountDownFINData();
       }
     }
-    requestSendAck(); // 接受数据后都会请求发送一次ACK
+    requestSendAck(); // After receiving data, an ACK (Acknowledgment) request will be sent once.
   }
 
-  /// 发送数据包。
+  // Send a data packet.
   ///
-  /// 每次发送的数据包都会更新发送时间以及timedifference，并且会携带最新的ack和selectiveAck。但是
-  /// 如果是STATE类型，则不会更改原有的ack值。
+  /// Every time a data packet is sent, the send time and time difference will be updated, and the latest ACK and Selective ACK will be included. However, if the packet type is STATE, the original ACK value will not be changed.
   ///
-  /// [packet]是数据包对象。
+  /// [packet] is the data packet object.
   ///
-  /// [times]是第几次重发
+  /// [times] indicates the number of retries.
   ///
-  /// [increase]表示是否自增seq , 如果type是ST_STATE，则该值无论真假，都不会增加seq
+  /// [increase] indicates whether to increment the sequence number. If the type is ST_STATE, this value does not affect the sequence number and will not be increased.
   ///
-  /// [save]表示是否保存到in-flighting packets map中，如果type是ST_STATE，则该值无论真假，都不会保存
+  /// [save] indicates whether to save the packet to the in-flight packets map. If the type is ST_STATE, this value does not affect saving, and the packet will not be saved.
   bool sendPacket(UTPPacket packet,
       [int times = 0, bool increase = true, bool save = true]) {
     if (isClosed) return false;
     var len = packet.length;
     _currentWindowSize += len;
-    // 按照包被创建时间来计算
+    //Calculated according to the time when the package was created
     _startTimeOffset ??= DateTime.now().microsecondsSinceEpoch;
     var time = getNowTimestamp(_startTimeOffset!);
     var diff = (time - lastRemotePktTimestamp!).abs() & MAX_UINT32;
@@ -994,10 +990,11 @@ class UTPSocketImpl extends UTPSocket {
     if (packet.type == ST_DATA ||
         packet.type == ST_SYN ||
         packet.type == ST_FIN) {
-      lastAck = lastRemoteSeq; // DATA类型发送的时候携带最新的ack
+      lastAck =
+          lastRemoteSeq; // When sending data of type DATA, it carries the latest ACK (Acknowledgment) information.
     }
     if (packet.type == ST_DATA || packet.type == ST_STATE) {
-      // 携带最新的selectiveAck
+      // Carrying the latest Selective ACK (Acknowledgment) information.
       packet.clearExtensions();
       var selectiveAck = newSelectiveACK();
       if (selectiveAck != null) {
@@ -1017,14 +1014,14 @@ class UTPSocketImpl extends UTPSocket {
         _startTimeoutCounter(times);
       }
     }
-    // 每次发送都会更新一次keepalive
+    // Every time data is sent, the keepalive will be updated."
     if (isConnected && success) startKeepAlive();
     return success;
   }
 
-  /// 发送FIN消息给对方。
+  ///Send a FIN message to the other party.
   ///
-  /// 此方法会在close的时候调用
+  ///This method will be called when closing
   void _sendFIN() {
     if (isClosed || _finSended) return;
     var packet =
@@ -1039,7 +1036,7 @@ class UTPSocketImpl extends UTPSocket {
 
   void _startCountDownFINData([int times = 0]) {
     if (times >= 5) {
-      // 超时
+      // timeout
       closeForce();
       return;
     }
@@ -1057,9 +1054,9 @@ class UTPSocketImpl extends UTPSocket {
     }
   }
 
-  /// 强制关闭
+  ///force close
   ///
-  /// 不发送FIN给remote，直接关闭socket
+  ///Do not send FIN to remote, close the socket directly
   void closeForce() async {
     if (isClosed) return;
     connectionState = UTPConnectState.CLOSED;
@@ -1090,7 +1087,7 @@ class UTPSocketImpl extends UTPSocket {
 
     _baseDelays.clear();
 
-    // 相当于抛出一个事件
+    // Equivalent to firing an event
     Timer.run(() {
       _handler?.socketClosed(this);
       _handler = null;

@@ -20,8 +20,8 @@ void processReceiveData(
     void Function(UTPSocketImpl socket)? newSocket,
     void Function(UTPSocketImpl socket, dynamic error)? onError}) {
   // print(
-  //     '收到对方${TYPE_NAME[packetData.type]}包:seq_nr:${packetData.seq_nr} , ack_nr : ${packetData.ack_nr}');
-  // if (packetData.dataExtension != null) print('有Extension');
+  //     'Received ${TYPE_NAME[packetData.type]} packet from the other side: seq_nr:${packetData.seq_nr}, ack_nr: ${packetData.ack_nr}');
+  // if (packetData.dataExtension != null) print('Has extension');
   if (socket != null && socket.isClosed) return;
   // dev.log(
   //     'Receive(${_Type2Map[packetData.type]}) : seq : ${packetData.seq_nr} , ack : ${packetData.ack_nr}',
@@ -46,15 +46,15 @@ void processReceiveData(
   }
 }
 
-/// 处理Reset消息。
+/// Handle Reset messages
 ///
-/// Socket接收到此消息后强行关闭连接
+/// After receiving this message, the Socket forcefully closes the connection
 void _processResetMessage(UTPSocketImpl? socket) {
   // socket?.addError('Reset by remote');
   socket?.closeForce();
 }
 
-/// 处理FIN消息
+/// Handle FIN messages
 void _processFINMessage(UTPSocketImpl? socket, UTPPacket packetData) async {
   if (socket == null || socket.isClosed || socket.isClosing) return;
   socket.remoteFIN(packetData.seq_nr);
@@ -64,9 +64,9 @@ void _processFINMessage(UTPSocketImpl? socket, UTPPacket packetData) async {
   socket.remoteAcked(packetData.ack_nr, packetData.timestampDifference, false);
 }
 
-/// 处理进来的SYN消息
+/// Handle incoming SYN messages.
 ///
-/// 每次收到SYN消息，都要新建一个连接。但是如果该连接ID已经有对应的[socket]，那就应该通知对方Reset
+/// Every time a SYN message is received, a new connection should be established. However, if the connection ID already has a corresponding [socket], then it should notify the other party with a Reset
 void _processSYNMessage(UTPSocketImpl? socket, RawDatagramSocket? rawSocket,
     InternetAddress remoteAddress, int remotePort, UTPPacket packetData,
     [void Function(UTPSocketImpl socket)? newSocket]) {
@@ -83,9 +83,12 @@ void _processSYNMessage(UTPSocketImpl? socket, RawDatagramSocket? rawSocket,
     socket = UTPSocketImpl(rawSocket, remoteAddress, remotePort);
     // init receive_id and sent_id
     socket.receiveId = connId;
-    socket.sendId = packetData.connectionId; // 保证发送的conn id一致
-    socket.currentLocalSeq = Random().nextInt(MAX_UINT16); // 随机seq
-    socket.connectionState = UTPConnectState.SYN_RECV; // 更改连接状态
+    socket.sendId = packetData
+        .connectionId; // Ensure that the sent connection ID remains consistent
+    socket.currentLocalSeq =
+        Random().nextInt(MAX_UINT16); // Random sequence number
+    socket.connectionState =
+        UTPConnectState.SYN_RECV; // Modify the connection state
     socket.lastRemoteSeq = packetData.seq_nr;
     socket.remoteWndSize = packetData.wnd_size;
     socket.lastRemotePktTimestamp = packetData.sendTime;
@@ -96,7 +99,7 @@ void _processSYNMessage(UTPSocketImpl? socket, RawDatagramSocket? rawSocket,
   return;
 }
 
-/// 通过UDP套接字直接发送一个RESET类型消息给对方
+/// Send a RESET type message directly to the other party through the UDP socket
 Future sendResetMessage(int connId, RawDatagramSocket? rawSocket,
     InternetAddress remoteAddress, int remotePort,
     [UTPPacket? packet, Completer? completer]) {
@@ -115,7 +118,7 @@ Future sendResetMessage(int connId, RawDatagramSocket? rawSocket,
   return completer.future;
 }
 
-/// 将packet数据中的SelectiveAck Extension带的ack序列号读出
+/// Read out the ack sequence number carried by the SelectiveAck Extension in the packet data
 List<int> _readSelectiveAcks(UTPPacket packetData) {
   var selectiveAcks = <int>[];
   if (packetData.extensionList.isNotEmpty) {
@@ -129,9 +132,9 @@ List<int> _readSelectiveAcks(UTPPacket packetData) {
   return selectiveAcks;
 }
 
-/// 处理进来的Data消息
+///Process the incoming Data message
 ///
-/// 对于处于SYN_RECV的socket来说，此时收到消息如果序列号正确，那就是真正连接成功
+///For the socket in SYN_RECV, if the sequence number is correct when the message is received , it means that the connection is successful
 void processDataMessage(UTPSocketImpl? socket, UTPPacket packetData,
     [void Function(UTPSocketImpl)? onConnected,
     void Function(UTPSocketImpl source, dynamic error)? onError]) {
@@ -146,9 +149,10 @@ void processDataMessage(UTPSocketImpl? socket, UTPPacket packetData,
     socket.remoteWndSize = packetData.wnd_size;
     if (onConnected != null) onConnected(socket);
   }
-  // 已连接状态下收到数据后去掉header，把payload以事件发出
+  // After receiving data in the connected state, remove the header and emit the payload as an event.
   if (socket.isConnected || socket.isClosing) {
-    socket.remoteWndSize = packetData.wnd_size; // 更新对方的window size
+    socket.remoteWndSize =
+        packetData.wnd_size; // Update the window size of the peer.
     socket.lastRemotePktTimestamp = packetData.sendTime;
     socket.addReceivePacket(packetData);
     socket.remoteAcked(packetData.ack_nr, packetData.timestampDifference, false,
@@ -158,9 +162,9 @@ void processDataMessage(UTPSocketImpl? socket, UTPPacket packetData,
   }
 }
 
-/// 处理Ack消息
+/// Handling Ack messages
 ///
-/// 如果[socket]处于SYN_SENT状态，那么此时如果序列号正确即表示连接成功
+/// If the [socket] is in the SYN_SENT state, then at this point, if the sequence number is correct, it means the connection is successful.
 void processStateMessage(UTPSocketImpl? socket, UTPPacket packetData,
     [void Function(UTPSocketImpl)? onConnected,
     void Function(UTPSocketImpl source, dynamic error)? onError]) {
@@ -177,7 +181,8 @@ void processStateMessage(UTPSocketImpl? socket, UTPPacket packetData,
     if (onConnected != null) onConnected(socket);
   }
   if (socket.isConnected || socket.isClosing) {
-    socket.remoteWndSize = packetData.wnd_size; // 更新对方的window size
+    socket.remoteWndSize =
+        packetData.wnd_size; // Update the window size of the peer.
     socket.lastRemotePktTimestamp = packetData.sendTime;
     socket.remoteAcked(
         packetData.ack_nr, packetData.timestampDifference, true, selectiveAcks);
