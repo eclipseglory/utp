@@ -66,7 +66,7 @@ class UTPSocketClient extends UTPCloseHandler with UTPSocketRecorder {
         UTPConnectState.SYN_SENT; // Modify the socket connection state.
     // Initialize send_id and _receive_id.
     utp.receiveId = connId; // Initialize a random connection ID.
-    utp.sendId = (utp.receiveId ?? 0 + 1) & MAX_UINT16;
+    utp.sendId = (utp.receiveId! + 1) & MAX_UINT16;
     utp.sendId &= MAX_UINT16; // Avoid overflow
     utp.currentLocalSeq = Random()
         .nextInt(MAX_UINT16); // Generate a random sequence number (seq).
