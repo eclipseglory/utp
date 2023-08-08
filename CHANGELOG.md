@@ -18,26 +18,36 @@
 - Use dymanic window size and packet size to control data sending
 
 ## 0.2.1
+
 - Fix FIN message bug
 
 ## 0.3.0
+
 - Change FIN message process logic
 - Process RESET message
 - Write README
 
-
 ## 0.3.1
+
 - Fix UTP packet parse bug
 
 ## 0.4.0
+
 - Implement LEDBAT
 - Change packet sending process to improve sending speed.
 
 ## 1.0.0
+
 - Fix destroy method bug
 - Fix close method bug
 - Clear codes
 
 ## 1.0.1
+
 - Fix minrtt null bug
 - Delete log print
+
+## 1.0.2
+
+- migrate to nullsafety
+- linting and code style enhancments
