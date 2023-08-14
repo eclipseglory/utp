@@ -1,7 +1,7 @@
 import 'dart:math';
 import 'dart:typed_data';
 
-import 'package:utp/src/utp_data.dart';
+import 'package:utp_protocol/src/utp_data.dart';
 import 'package:test/test.dart';
 
 void main() {

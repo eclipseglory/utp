@@ -1,8 +1,8 @@
 import 'dart:convert';
 import 'dart:io';
 
-import 'package:utp/src/base/server_utp_socket.dart';
-import 'package:utp/src/utp_socket_client.dart';
+import 'package:utp_protocol/src/base/server_utp_socket.dart';
+import 'package:utp_protocol/src/utp_socket_client.dart';
 
 void main() async {
   var total = 21889;
